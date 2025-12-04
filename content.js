@@ -3,6 +3,11 @@
  * Licensed under the MIT License. See the LICENSE file for details.
  */
 
+/* Safari compatibility: expose chrome namespace when only browser.* exists */
+if (typeof browser !== 'undefined' && typeof chrome === 'undefined') {
+  globalThis.chrome = browser;
+}
+
 // Inject inject.js into the page context so we can monkey-patch window.fetch/XHR.
 (() => {
   try { console.log('[SoraUV] content: start, injecting inject.js'); } catch {}
