@@ -4,7 +4,7 @@
 - `manifest.json`, `background.js`, `content.js`, `inject.js`, `dashboard.*` implement the Chrome/Safari web extension that instruments `https://sora.chatgpt.com`.
 - `content.js` injects `inject.js` into the page context and persists metrics via `chrome.storage.local`.
 - `dashboard.js/html/css` render the standalone analytics dashboard that opens via the browser action.
-- `inject.js` is very large (~4K LOC) and hooks `fetch`/XHR to collect stats, power Gather/Analyze modes, and render badges in-page.
+- `inject.js` is very large (~4K LOC) and hooks `fetch`/XHR to collect stats, power Gather/Analyze modes, and render badges in-page. Gather controls expose toggles for auto refresh and “Unload off-screen videos”; the latter uses an `IntersectionObserver` to remove `<video>` sources once cards leave the viewport, dramatically lowering memory use during long gather runs.
 
 ## Safari Wrapper
 - Generated via `xcrun safari-web-extension-converter`; lives in `safari-extension/Sora Creator Tools/`.

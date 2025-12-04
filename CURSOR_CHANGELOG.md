@@ -11,4 +11,5 @@
 - Shortened `manifest.json` `name`/`description` to satisfy Safari’s ≤40/≤112 character validation limits.
 - Added `LSApplicationCategoryType` (`public.app-category.utilities`) to the macOS host’s `Info.plist` to satisfy App Store category requirements.
 - Declared `ITSAppUsesNonExemptEncryption = NO` in all host/extension Info.plists so App Store submissions automatically state that no custom encryption is used.
+- Enhanced Gather controls in `inject.js` with toggles for auto refresh and “Unload off-screen videos,” plus an IntersectionObserver that pauses/removes video sources when cards leave the viewport to cut memory usage.
 

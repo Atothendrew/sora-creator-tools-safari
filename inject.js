@@ -1348,6 +1348,7 @@
       const uv = idToUnique.get(id);
       const meta = idToMeta.get(id);
       addBadge(card, uv, meta);
+      observeVideosForAutoUnload(card);
     }
     applyFilter();
   }
@@ -2306,6 +2307,14 @@
       prefs.gatherSpeed = '0';
       setPrefs(prefs);
     }
+    if (typeof prefs.gatherAutoRefresh !== 'boolean') {
+      prefs.gatherAutoRefresh = true;
+      setPrefs(prefs);
+    }
+    if (typeof prefs.gatherAutoUnload !== 'boolean') {
+      prefs.gatherAutoUnload = true;
+      setPrefs(prefs);
+    }
 
     // ---- PRESERVE SESSION ACROSS REFRESH ----
     // Only initialize a new session if no session exists; do NOT clobber an existing one.
@@ -2572,6 +2581,46 @@
     gatherControlsWrapper.appendChild(refreshTimerDisplay);
     gatherTimerEl = refreshTimerDisplay;
 
+    const autoRefreshToggle = document.createElement('label');
+    autoRefreshToggle.className = 'sora-uv-auto-refresh';
+    Object.assign(autoRefreshToggle.style, {
+      display: 'flex',
+      alignItems: 'center',
+      gap: '8px',
+      fontSize: '12px',
+      color: 'rgba(255, 255, 255, 0.85)',
+      background: 'transparent',
+    });
+    const autoRefreshCheckbox = document.createElement('input');
+    autoRefreshCheckbox.type = 'checkbox';
+    autoRefreshCheckbox.className = 'sora-uv-auto-refresh-checkbox';
+    autoRefreshCheckbox.checked = gatherAutoRefreshEnabled();
+    const autoRefreshLabel = document.createElement('span');
+    autoRefreshLabel.textContent = 'Auto refresh';
+    autoRefreshToggle.appendChild(autoRefreshCheckbox);
+    autoRefreshToggle.appendChild(autoRefreshLabel);
+    gatherControlsWrapper.appendChild(autoRefreshToggle);
+
+    const autoUnloadToggle = document.createElement('label');
+    autoUnloadToggle.className = 'sora-uv-auto-unload';
+    Object.assign(autoUnloadToggle.style, {
+      display: 'flex',
+      alignItems: 'center',
+      gap: '8px',
+      fontSize: '12px',
+      color: 'rgba(255, 255, 255, 0.85)',
+      background: 'transparent',
+    });
+    const autoUnloadCheckbox = document.createElement('input');
+    autoUnloadCheckbox.type = 'checkbox';
+    autoUnloadCheckbox.className = 'sora-uv-auto-unload-checkbox';
+    autoUnloadCheckbox.checked = gatherAutoUnloadEnabled();
+    const autoUnloadLabel = document.createElement('span');
+    autoUnloadLabel.textContent = 'Unload off-screen videos';
+    autoUnloadToggle.appendChild(autoUnloadCheckbox);
+    autoUnloadToggle.appendChild(autoUnloadLabel);
+    gatherControlsWrapper.appendChild(autoUnloadToggle);
+
     bar.appendChild(gatherControlsWrapper);
 
     const onSliderChange = () => {
@@ -2581,6 +2630,20 @@
       if (isGatheringActiveThisTab) startGathering(true);
     };
     slider.addEventListener('input', onSliderChange);
+    autoRefreshCheckbox.addEventListener('change', () => {
+      const p = getPrefs();
+      p.gatherAutoRefresh = autoRefreshCheckbox.checked;
+      setPrefs(p);
+      if (isGatheringActiveThisTab) startGathering(true);
+      else updateCountdownDisplay();
+    });
+    autoUnloadCheckbox.addEventListener('change', () => {
+      const p = getPrefs();
+      p.gatherAutoUnload = autoUnloadCheckbox.checked;
+      setPrefs(p);
+      if (autoUnloadCheckbox.checked) refreshAutoUnloadTargets();
+      else disableAutoUnloadVideos();
+    });
 
     // ----- Filter lock logic -----
     function applyFilterLockState() {
@@ -4305,6 +4368,10 @@ async function renderAnalyzeTable(force = false) {
       if (gatherTimerEl) gatherTimerEl.textContent = '';
       return;
     }
+    if (!gatherAutoRefreshEnabled()) {
+      gatherTimerEl.textContent = 'Auto refresh disabled';
+      return;
+    }
     const state = getGatherState();
     const deadline = state.refreshDeadline;
     if (deadline) {
@@ -4340,13 +4407,20 @@ async function renderAnalyzeTable(force = false) {
       tick();
     }
 
+    const autoRefreshEnabled = gatherAutoRefreshEnabled();
+    if (!autoRefreshEnabled) {
+      const s = getGatherState() || {};
+      delete s.refreshDeadline;
+      setGatherState(s);
+    }
+
     if (isTopFeed()) {
       // === TOP: keep 10m loop ===
       const refreshMs = 10 * 60 * 1000;
       const TOP_PX_PER_STEP = 7; //  67% of 10.66 (33% slower)
 
       const s0 = getGatherState() || {};
-      if (!forceNewDeadline && typeof s0.refreshDeadline === 'number' && s0.refreshDeadline > Date.now()) {
+      if (!forceNewDeadline && typeof s0.refreshDeadline === 'number' && s0.refreshDeadline > Date.now() && autoRefreshEnabled) {
         const remaining = s0.refreshDeadline - Date.now();
         startSmoothAutoScroll(TOP_PX_PER_STEP);
         gatherRefreshTimeoutId = setTimeout(() => location.reload(), remaining);
@@ -4356,16 +4430,18 @@ async function renderAnalyzeTable(force = false) {
 
       startSmoothAutoScroll(TOP_PX_PER_STEP);
 
-      const now = Date.now();
-      let sessionState = getGatherState() || {};
-      let refreshDelay = refreshMs;
-      if (!forceNewDeadline && sessionState.refreshDeadline && sessionState.refreshDeadline > now) {
-        refreshDelay = sessionState.refreshDeadline - now;
-      } else {
-        sessionState.refreshDeadline = now + refreshDelay;
-        setGatherState(sessionState);
+      if (autoRefreshEnabled) {
+        const now = Date.now();
+        let sessionState = getGatherState() || {};
+        let refreshDelay = refreshMs;
+        if (!forceNewDeadline && sessionState.refreshDeadline && sessionState.refreshDeadline > now) {
+          refreshDelay = sessionState.refreshDeadline - now;
+        } else {
+          sessionState.refreshDeadline = now + refreshDelay;
+          setGatherState(sessionState);
+        }
+        gatherRefreshTimeoutId = setTimeout(() => location.reload(), refreshDelay);
       }
-      gatherRefreshTimeoutId = setTimeout(() => location.reload(), refreshDelay);
       updateCountdownDisplay();
       return;
     }
@@ -4406,17 +4482,23 @@ async function renderAnalyzeTable(force = false) {
       refreshMaxMs = lerp(speedMid.rMax, speedFast.rMax, u);
     }
 
-    const now = Date.now();
-    let s = getGatherState() || {};
-    let refreshDelay;
-    if (!forceNewDeadline && s.refreshDeadline && s.refreshDeadline > now) {
-      refreshDelay = s.refreshDeadline - now;
+    if (autoRefreshEnabled) {
+      const now = Date.now();
+      let s = getGatherState() || {};
+      let refreshDelay;
+      if (!forceNewDeadline && s.refreshDeadline && s.refreshDeadline > now) {
+        refreshDelay = s.refreshDeadline - now;
+      } else {
+        refreshDelay = Math.random() * (refreshMaxMs - refreshMinMs) + refreshMinMs;
+        s.refreshDeadline = now + refreshDelay;
+        setGatherState(s);
+      }
+      gatherRefreshTimeoutId = setTimeout(() => location.reload(), refreshDelay);
     } else {
-      refreshDelay = Math.random() * (refreshMaxMs - refreshMinMs) + refreshMinMs;
-      s.refreshDeadline = now + refreshDelay;
+      const s = getGatherState() || {};
+      delete s.refreshDeadline;
       setGatherState(s);
     }
-    gatherRefreshTimeoutId = setTimeout(() => location.reload(), refreshDelay);
     updateCountdownDisplay();
   }
 
@@ -5765,6 +5847,106 @@ async function renderAnalyzeTable(force = false) {
   function setPrefs(p) {
     localStorage.setItem(PREF_KEY, JSON.stringify(p));
   }
+  function gatherAutoRefreshEnabled() {
+    const prefs = getPrefs();
+    if (typeof prefs.gatherAutoRefresh === 'boolean') return prefs.gatherAutoRefresh;
+    return true;
+  }
+  function gatherAutoUnloadEnabled() {
+    const prefs = getPrefs();
+    if (typeof prefs.gatherAutoUnload === 'boolean') return prefs.gatherAutoUnload;
+    return true;
+  }
+
+  const AUTO_UNLOAD_ROOT_MARGIN = '200px';
+  let autoUnloadObserver = null;
+  let autoUnloadObservedVideos = new WeakSet();
+
+  function ensureAutoUnloadObserver() {
+    if (autoUnloadObserver) return autoUnloadObserver;
+    autoUnloadObserver = new IntersectionObserver(onAutoUnloadIntersection, {
+      root: null,
+      rootMargin: AUTO_UNLOAD_ROOT_MARGIN,
+      threshold: 0,
+    });
+    autoUnloadObservedVideos = new WeakSet();
+    return autoUnloadObserver;
+  }
+
+  function onAutoUnloadIntersection(entries) {
+    if (!gatherAutoUnloadEnabled()) return;
+    for (const entry of entries) {
+      const video = entry.target;
+      if (entry.isIntersecting) reloadVideoElement(video);
+      else unloadVideoElement(video);
+    }
+  }
+
+  function unloadVideoElement(video) {
+    if (video.dataset.soraUvUnloaded === '1') return;
+    try {
+      if (!video.dataset.soraUvSrc) {
+        const src = video.getAttribute('src');
+        if (src) video.dataset.soraUvSrc = src;
+      }
+      if (!video.dataset.soraUvSources && video.children.length) {
+        video.dataset.soraUvSources = video.innerHTML;
+        video.innerHTML = '';
+      }
+      video.pause();
+      if (video.hasAttribute('src')) video.removeAttribute('src');
+      video.load();
+      video.dataset.soraUvUnloaded = '1';
+    } catch (err) {
+      console.warn('[SoraUV] failed to unload video', err);
+    }
+  }
+
+  function reloadVideoElement(video) {
+    if (video.dataset.soraUvUnloaded !== '1') return;
+    try {
+      if (video.dataset.soraUvSources && !video.children.length) {
+        video.innerHTML = video.dataset.soraUvSources;
+      }
+      const savedSrc = video.dataset.soraUvSrc;
+      if (savedSrc && !video.getAttribute('src')) {
+        video.setAttribute('src', savedSrc);
+      }
+      video.load();
+      delete video.dataset.soraUvUnloaded;
+    } catch (err) {
+      console.warn('[SoraUV] failed to reload video', err);
+    }
+  }
+
+  function observeVideosForAutoUnload(card) {
+    if (!gatherAutoUnloadEnabled()) return;
+    const observer = ensureAutoUnloadObserver();
+    const videos = card.querySelectorAll('video');
+    for (const video of videos) {
+      if (autoUnloadObservedVideos.has(video)) continue;
+      observer.observe(video);
+      autoUnloadObservedVideos.add(video);
+    }
+  }
+
+  function refreshAutoUnloadTargets() {
+    if (!gatherAutoUnloadEnabled()) return;
+    for (const card of selectAllCards()) observeVideosForAutoUnload(card);
+  }
+
+  function disableAutoUnloadVideos() {
+    if (autoUnloadObserver) {
+      autoUnloadObserver.disconnect();
+      autoUnloadObserver = null;
+    }
+    autoUnloadObservedVideos = new WeakSet();
+    document.querySelectorAll('video[data-sora-uv-src], video[data-sora-uv-unloaded]').forEach((video) => {
+      reloadVideoElement(video);
+      delete video.dataset.soraUvSources;
+      delete video.dataset.soraUvSrc;
+    });
+  }
 
   // == Bookmarks (Drafts) ==
   function getBookmarks() {
@@ -5818,9 +6000,18 @@ async function renderAnalyzeTable(force = false) {
     if (e.key !== PREF_KEY) return;
     try {
       const newPrefs = JSON.parse(e.newValue || '{}');
-      if (newPrefs.gatherSpeed == null) return;
       const slider = document.querySelector('.sora-uv-controls input[type="range"]');
-      if (slider && slider.value !== newPrefs.gatherSpeed) slider.value = newPrefs.gatherSpeed;
+      if (slider && newPrefs.gatherSpeed != null && slider.value !== newPrefs.gatherSpeed) slider.value = newPrefs.gatherSpeed;
+      const autoToggle = document.querySelector('.sora-uv-auto-refresh-checkbox');
+      if (autoToggle && typeof newPrefs.gatherAutoRefresh === 'boolean') {
+        autoToggle.checked = newPrefs.gatherAutoRefresh;
+      }
+      const autoUnloadToggle = document.querySelector('.sora-uv-auto-unload-checkbox');
+      if (autoUnloadToggle && typeof newPrefs.gatherAutoUnload === 'boolean') {
+        autoUnloadToggle.checked = newPrefs.gatherAutoUnload;
+        if (newPrefs.gatherAutoUnload) refreshAutoUnloadTargets();
+        else disableAutoUnloadVideos();
+      }
       if (isGatheringActiveThisTab && !isTopFeed()) startGathering(true);
     } catch (err) {
       console.error('Sora UV: Error applying storage change.', err);
