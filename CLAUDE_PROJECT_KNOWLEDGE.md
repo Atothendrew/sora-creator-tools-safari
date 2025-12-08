@@ -1,5 +1,20 @@
 # CLAUDE_PROJECT_KNOWLEDGE
 
+## Repository Layout
+- Browser extension assets (`manifest.json`, `background.js`, `inject.js`, dashboard files, icons, imagery) live at the repo root.
+- The Safari wrapper generated via `safari-web-extension-converter` lives in `safari-extension/Sora Creator Tools/` with macOS/iOS host apps, shared Swift sources, and the `.xcodeproj`.
+- `imagery/Sorastat-logo.png` powers the README's sponsor callout—keep it updated if sponsorship changes.
+
+## Git Remotes & Branches
+- `origin` points to `fancyson-ai/sora-creator-tools` (upstream mainline).
+- `safari` points to the fork (`Atothendrew/sora-creator-tools-safari`). Local `ios` tracks `safari/ios`.
+- To sync the fork: `git fetch origin`, update `main`, then rebase or merge `ios` atop `main` before pushing (`git push safari ios --force-with-lease` after a rebase).
+- After cross-branch integrations, rebuild both Xcode schemes (macOS + iOS/iPhone 16) to honor the project rules.
+
+## Notes
+- Prefer `@Observable` over `ObservableObject`, run `SwiftTests` for host app coverage when needed, and avoid iPhone 15 simulators per the repo guidelines.
+- When adding Swift files to the wrapper, use the `xcodeproj` gem so the project references stay consistent.
+
 ## Codebase Overview
 - `manifest.json`, `background.js`, `content.js`, `inject.js`, `dashboard.*` implement the Chrome/Safari web extension that instruments `https://sora.chatgpt.com`.
 - `content.js` injects `inject.js` into the page context and persists metrics via `chrome.storage.local`.

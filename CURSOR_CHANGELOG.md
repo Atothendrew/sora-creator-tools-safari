@@ -1,5 +1,13 @@
 # CURSOR_CHANGELOG
 
+# CURSOR_CHANGELOG
+
+## 2025-12-08
+- Rebasing `ios` onto the latest `main` replaced the previous merge attempt with a linear history; resolved README/`manifest.json`/`dashboard.js` conflicts so the Sorastats sponsor block coexists with the rebranded "Creator Tools for Sora" copy while preserving the Safari wrapper additions.
+- Rebuilt `Sora Creator Tools (macOS)` and `Sora Creator Tools (iOS)` via `xcodebuild` (iPhone 16 simulator) after the rebase to verify the wrapper still compiles end-to-end.
+- Documented the sync flow and repo layout details in `CLAUDE_PROJECT_KNOWLEDGE.md` for future maintenance.
+- Shortened the manifest `name`/`description` strings (`"Creator Tools for Sora"` / `"Overlay unique views..."`) to satisfy Safari's ≤40/≤112 character limits so the wrapper validates again.
+
 ## 2025-12-04
 - Generated Safari Web Extension Xcode wrapper via `safari-web-extension-converter`.
 - Added Safari browser-namespace polyfill to `background.js`, `content.js`, and `dashboard.js`.

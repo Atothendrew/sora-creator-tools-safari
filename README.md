@@ -1,4 +1,4 @@
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE) [![Add to Chrome](https://img.shields.io/badge/Chrome%20Extension-Add%20Now-blue?logo=googlechrome&logoColor=white)](https://chromewebstore.google.com/detail/sora-explore-unique-views/nijonhldjpdanckbnkjgifghnkekmljk?)
+﻿﻿[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE) [![Add to Chrome](https://img.shields.io/badge/Chrome%20Extension-Add%20Now-blue?logo=googlechrome&logoColor=white)](https://chromewebstore.google.com/detail/sora-explore-unique-views/nijonhldjpdanckbnkjgifghnkekmljk?)
 
 <p>
   <strong>🧡 Supported by Our Sponsors</strong><br>
@@ -32,7 +32,6 @@ Plus **DASHBOARD MODE:** Click on the extension icon to open a full-page dashboa
 - Hover tooltips, per-post colors, and trend lines; click a point to open the post
 - Thumbnails and direct links in the post list; select up to two posts to compare
 - Export all snapshots for a user as CSV
-- Filter posts by Today, Yesterday, quick Last 3/7/30 day windows, or any custom "last N days" range (state persists between sessions)
 - Pair with Gather Mode for always-current data
 - ALL DATA STORED 100% LOCALLY IN YOUR BROWSER AND NEVER TRANSMITTED!
 
@@ -81,6 +80,7 @@ Contributions are accepted under the DCO (see [CONTRIBUTING.md](./CONTRIBUTING.m
 ![](/imagery/extension3.jpg)
 
 ![](/imagery/extension4.jpg)
+
 
 
 
