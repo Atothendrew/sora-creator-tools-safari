@@ -25,7 +25,59 @@ input[type=search]:focus, select:focus{border-color:rgba(255,255,255,0.20);outli
 .sidebar::-webkit-scrollbar{display:none}
 .sidebar h3{margin:6px 6px 10px;font-size:12px;color:var(--muted);font-weight:600;text-transform:uppercase}
 .list-actions{display:flex;flex-wrap:wrap;gap:8px;margin:0 6px 10px}
+.date-filter{
+  margin:0 6px 14px;
+  padding:10px;
+  border:1px solid var(--border);
+  border-radius:12px;
+  background:var(--chip);
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+}
+.date-filter label{
+  font-size:12px;
+  font-weight:600;
+  color:var(--muted);
+  text-transform:uppercase;
+  letter-spacing:0.04em;
+}
+.date-filter-row{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  align-items:center;
+}
+.date-filter select{
+  flex:1;
+  min-width:150px;
+}
+.date-filter-custom{
+  display:none;
+  align-items:center;
+  gap:6px;
+  flex-wrap:wrap;
+}
+.date-filter-custom.is-visible{
+  display:flex;
+}
+.date-filter-custom input[type=number]{
+  width:72px;
+}
+.date-filter-summary{
+  font-size:12px;
+  color:var(--muted);
+}
 .posts{display:flex;flex-direction:column;gap:6px}
+.posts-empty{
+  padding:14px;
+  text-align:center;
+  font-size:12px;
+  color:var(--muted);
+  border:1px dashed var(--border);
+  border-radius:10px;
+  background:rgba(20,20,20,0.4);
+}
 /* Improve row layout so toggle doesn't hug the edge */
 .post{display:grid;grid-template-columns:auto 1fr auto;align-items:center;column-gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:10px;background:var(--chip);box-shadow:inset 0 0 1px rgba(255,255,255,0.06),0 1px 10px rgba(0,0,0,0.30);transition:border-color 120ms ease,box-shadow 120ms ease;position:relative}
 .post.selected{border-color: var(--accent); box-shadow: 0 0 0 1px rgba(125,196,255,0.2) inset, inset 0 0 1px rgba(255,255,255,0.06),0 1px 10px rgba(0,0,0,0.30)}

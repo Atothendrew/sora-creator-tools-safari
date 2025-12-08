@@ -379,29 +379,6 @@ if (typeof browser !== 'undefined' && typeof chrome === 'undefined') {
     return res;
   }
 
-  // Helper function to build post label with cameo info
-  function buildPostLabel(post, userHandle) {
-    const cap = (typeof post?.caption === 'string' && post.caption) ? post.caption.trim() : null;
-    const cameos = Array.isArray(post?.cameo_usernames) ? post.cameo_usernames.filter(c => typeof c === 'string' && c.trim()) : [];
-    const owner = userHandle || '';
-    const captionText = cap || post.id || '';
-    
-    if (owner && cameos.length > 0) {
-      const cameoList = cameos.join(', ');
-      return `${owner} cast ${cameoList} - ${captionText}`;
-    } else if (owner) {
-      return `${owner} - ${captionText}`;
-    } else {
-      return captionText;
-    }
-  }
-
-  function truncateForPurgeCaption(text){
-    const clean = (typeof text === 'string' ? text.trim() : '') || 'this post';
-    if (clean.length <= 100) return clean;
-    return clean.slice(0, 100) + '...';
-  }
-
   function buildPostsList(user, colorFor, visibleSet, opts={}){
     const wrap = $('#posts');
     wrap.innerHTML='';
@@ -415,28 +392,12 @@ if (typeof browser !== 'undefined' && typeof chrome === 'undefined') {
       const rate = interactionRate(last);
       const bi = pidBigInt(pid);
       const cap = (typeof p?.caption === 'string' && p.caption) ? p.caption.trim() : null;
-      const cameos = Array.isArray(p?.cameo_usernames) ? p.cameo_usernames.filter(c => typeof c === 'string' && c.trim()) : [];
-      const owner = user?.handle || '';
-      
-      // Build label with cameo info: "owner cameoed cameo1, cameo2 - caption"
-      let label, title;
-      const captionText = cap || pid;
-      if (owner && cameos.length > 0) {
-        const cameoList = cameos.join(', ');
-        label = `${owner} cast ${cameoList} - ${captionText}`;
-        title = label;
-      } else if (owner) {
-        label = `${owner} - ${captionText}`;
-        title = label;
-      } else {
-        label = captionText;
-        title = captionText;
-      }
-      
+      const label = cap || pid; // one-line dynamic via CSS ellipsis
+      const title = cap || pid;
       if (DBG_SORT){
         try { console.log(`[Dashboard] sort pid=${pid} raw=${rawPT} norm=${postTime} pidBI=${bi.toString()}`); } catch {}
       }
-      return { pid, url: absUrl(p.url, pid), thumb: p.thumb, label, title, last, first, postTime, pidBI: bi, rate, cameos, owner, caption: cap };
+      return { pid, url: absUrl(p.url, pid), thumb: p.thumb, label, title, last, first, postTime, pidBI: bi, rate };
     });
     // Sort newest first assuming larger post_time is newer
     const withTs = mapped.filter(x=>x.postTime>0).sort((a,b)=>b.postTime - a.postTime);
@@ -448,154 +409,47 @@ if (typeof browser !== 'undefined' && typeof chrome === 'undefined') {
 
     // Update metric cards (sum of latest values for visible posts)
     try{
-      const uniqueViewsEl = $('#uniqueViewsTotal');
-      const totalViewsEl = $('#totalViewsTotal');
+      const viewsEl = $('#viewsTotal');
       const likesEl = $('#likesTotal');
       const repliesEl = $('#repliesTotal');
       const remixesEl = $('#remixesTotal');
       const interEl = $('#interactionsTotal');
-      const cameosEl = $('#userCameosTotal');
-      const followersEl = $('#userFollowersTotal');
-      let totalUniqueViews = 0, totalViews = 0, totalLikes = 0, totalReplies = 0, totalRemixes = 0, totalInteractions = 0;
+      let totalViews = 0, totalLikes = 0, totalReplies = 0, totalRemixes = 0, totalInteractions = 0;
       const current = visibleSet ? Array.from(visibleSet) : [];
       for (const pid of current){
         const post = user.posts?.[pid];
         const last = latestSnapshot(post?.snapshots);
-        totalUniqueViews += num(last?.uv);
         totalViews += num(last?.views);
         totalLikes += num(last?.likes);
         totalReplies += num(last?.comments); // non-recursive
         totalRemixes += num(latestRemixCountForPost(post));
         totalInteractions += interactionsOfSnap(last);
       }
-      if (uniqueViewsEl) uniqueViewsEl.textContent = fmt2(totalUniqueViews);
-      if (totalViewsEl) totalViewsEl.textContent = fmt2(totalViews);
+      if (viewsEl) viewsEl.textContent = fmt2(totalViews);
       if (likesEl) likesEl.textContent = fmt2(totalLikes);
       if (repliesEl) repliesEl.textContent = fmtK2OrInt(totalReplies);
       if (remixesEl) remixesEl.textContent = fmt2(totalRemixes);
       if (interEl) interEl.textContent = fmt2(totalInteractions);
-      // Update cameos and followers from user data (not post data)
-      if (cameosEl) {
-        const cameosArr = Array.isArray(user.cameos) ? user.cameos : [];
-        const lastCameo = cameosArr.length > 0 ? cameosArr[cameosArr.length - 1] : null;
-        cameosEl.textContent = lastCameo ? fmtK2OrInt(lastCameo.count) : '0';
-      }
-      if (followersEl) {
-        const followersArr = Array.isArray(user.followers) ? user.followers : [];
-        const lastFollower = followersArr.length > 0 ? followersArr[followersArr.length - 1] : null;
-        followersEl.textContent = lastFollower ? fmtK2OrInt(lastFollower.count) : '0';
-      }
     } catch {}
 
     for (let i=0;i<posts.length;i++){
       const p = posts[i];
-      const row = document.createElement('div');
+      const row = document.createElement('label');
       row.className='post';
       row.dataset.pid = p.pid;
       const color = typeof colorFor === 'function' ? colorFor(p.pid) : COLORS[i % COLORS.length];
       const thumbStyle = p.thumb ? `background-image:url('${p.thumb.replace(/'/g,"%27")}')` : '';
-      
-      // Create thumb div
-      const thumbDiv = document.createElement('div');
-      thumbDiv.className = 'thumb';
-      thumbDiv.style.cssText = thumbStyle;
-      const dotDiv = document.createElement('div');
-      dotDiv.className = 'dot';
-      dotDiv.style.background = color;
-      thumbDiv.appendChild(dotDiv);
-      
-      // Create meta div
-      const metaDiv = document.createElement('div');
-      metaDiv.className = 'meta';
-      
-      // Create id div with link
-      const idDiv = document.createElement('div');
-      idDiv.className = 'id';
-      const link = document.createElement('a');
-      link.href = p.url;
-      link.target = '_blank';
-      link.rel = 'noopener';
-      link.title = p.title;
-      
-      // Build link content with styled spans
-      if (p.owner) {
-        const ownerSpan = document.createElement('span');
-        ownerSpan.textContent = p.owner;
-        ownerSpan.style.fontWeight = '800';
-        link.appendChild(ownerSpan);
-        
-        if (p.cameos && p.cameos.length > 0) {
-          const cameoWord = document.createElement('span');
-          cameoWord.textContent = ' cast ';
-          cameoWord.style.fontWeight = '300';
-          link.appendChild(cameoWord);
-          
-          p.cameos.forEach((cameo, idx) => {
-            const cameoSpan = document.createElement('span');
-            cameoSpan.textContent = cameo;
-            cameoSpan.style.fontWeight = '800';
-            link.appendChild(cameoSpan);
-            
-            if (idx < p.cameos.length - 1) {
-              const comma = document.createElement('span');
-              comma.textContent = ', ';
-              comma.style.fontWeight = '300';
-              link.appendChild(comma);
-            }
-          });
-        }
-        
-        const sep = document.createElement('span');
-        sep.textContent = ' - ';
-        sep.style.fontWeight = '300';
-        link.appendChild(sep);
-        
-        const captionSpan = document.createElement('span');
-        captionSpan.textContent = p.caption || p.pid;
-        captionSpan.style.fontWeight = '300';
-        link.appendChild(captionSpan);
-      } else {
-        const captionSpan = document.createElement('span');
-        captionSpan.textContent = p.caption || p.pid;
-        captionSpan.style.fontWeight = '300';
-        link.appendChild(captionSpan);
-      }
-      
-      idDiv.appendChild(link);
-      
-      // Create stats div
-      const statsDiv = document.createElement('div');
-      statsDiv.className = 'stats';
-      statsDiv.textContent = `Unique ${fmt(p.last?.uv)} • Likes ${fmt(p.last?.likes)} • IR ${p.rate==null?'-':p.rate.toFixed(1)+'%'}`;
-      
-      metaDiv.appendChild(idDiv);
-      metaDiv.appendChild(statsDiv);
-      
-      // Create toggle div
-      const toggleDiv = document.createElement('div');
-      toggleDiv.className = 'toggle';
-      toggleDiv.dataset.pid = p.pid;
-      toggleDiv.textContent = 'Hide';
-
-      // Create purge button (shown on hover)
-      const purgeBtn = document.createElement('button');
-      purgeBtn.type = 'button';
-      purgeBtn.className = 'post-purge-btn';
-      purgeBtn.title = 'Purge data for this post';
-      purgeBtn.textContent = '×';
-      purgeBtn.addEventListener('click', (e)=>{
-        e.preventDefault();
-        e.stopPropagation();
-        const snippet = truncateForPurgeCaption(p.caption || p.label || p.pid);
-        if (opts.onPurge) opts.onPurge(p.pid, snippet);
-      });
-      
-      row.appendChild(thumbDiv);
-      row.appendChild(metaDiv);
-      row.appendChild(toggleDiv);
-      row.appendChild(purgeBtn);
-      
-      if (visibleSet && !visibleSet.has(p.pid)) { row.classList.add('hidden'); toggleDiv.textContent = 'Show'; }
+      row.innerHTML = `
+        <div class="thumb" style="${thumbStyle}">
+          <div class="dot" style="background:${color}"></div>
+        </div>
+        <div class="meta">
+          <div class="id"><a href="${p.url}" target="_blank" rel="noopener" title="${esc(p.title)}">${esc(p.label)}</a></div>
+          <div class="stats">Unique ${fmt(p.last?.uv)} • Likes ${fmt(p.last?.likes)} • IR ${p.rate==null?'-':p.rate.toFixed(1)+'%'}</div>
+        </div>
+        <div class="toggle" data-pid="${p.pid}">Hide</div>
+      `;
+      if (visibleSet && !visibleSet.has(p.pid)) { row.classList.add('hidden'); row.querySelector('.toggle').textContent = 'Show'; }
       wrap.appendChild(row);
     }
     // Hover interactions to dim non-hovered rows and sync chart highlight
@@ -615,13 +469,12 @@ if (typeof browser !== 'undefined' && typeof chrome === 'undefined') {
   }
 
   function computeTotalsForUser(user){
-    const res = { views:0, uniqueViews:0, likes:0, replies:0, remixes:0, interactions:0 };
+    const res = { views:0, likes:0, replies:0, remixes:0, interactions:0 };
     if (!user || !user.posts) return res;
     for (const [pid, p] of Object.entries(user.posts)){
       const last = latestSnapshot(p?.snapshots);
       if (!last) continue;
       res.views += num(last?.views);
-      res.uniqueViews += num(last?.uv);
       res.likes += num(last?.likes);
       res.replies += num(last?.comments);
       res.remixes += num(latestRemixCountForPost(p));
@@ -631,18 +484,17 @@ if (typeof browser !== 'undefined' && typeof chrome === 'undefined') {
   }
 
   function computeTotalsForUsers(userKeys, metrics){
-    const res = { views:0, uniqueViews:0, likes:0, replies:0, remixes:0, interactions:0, cameos:0, followers:0 };
+    const res = { views:0, likes:0, replies:0, remixes:0, interactions:0, cameos:0, followers:0 };
     for (const userKey of userKeys){
       const user = metrics?.users?.[userKey];
       if (!user) continue;
       const userTotals = computeTotalsForUser(user);
       res.views += userTotals.views;
-      res.uniqueViews += userTotals.uniqueViews;
       res.likes += userTotals.likes;
       res.replies += userTotals.replies;
       res.remixes += userTotals.remixes;
       res.interactions += userTotals.interactions;
-      // Get latest cast in count
+      // Get latest cameos count
       const cameosArr = Array.isArray(user.cameos) ? user.cameos : [];
       if (cameosArr.length > 0){
         const lastCameo = cameosArr[cameosArr.length - 1];
@@ -658,7 +510,7 @@ if (typeof browser !== 'undefined' && typeof chrome === 'undefined') {
     return res;
   }
 
-  function computeSeriesForUser(user, selectedPIDs, colorFor, useUniqueViews = true){
+  function computeSeriesForUser(user, selectedPIDs, colorFor){
     const series=[];
     const entries = Object.entries(user.posts||{});
     for (let i=0;i<entries.length;i++){
@@ -666,11 +518,11 @@ if (typeof browser !== 'undefined' && typeof chrome === 'undefined') {
       const pts = [];
       for (const s of (p.snapshots||[])){
         const r = interactionRate(s);
-        const viewValue = useUniqueViews ? s.uv : s.views;
-        if (viewValue != null && r != null) pts.push({ x:viewValue, y:r, t:s.t });
+        if (s.uv != null && r != null) pts.push({ x:s.uv, y:r, t:s.t });
       }
       const color = typeof colorFor === 'function' ? colorFor(pid) : COLORS[i % COLORS.length];
-      const label = buildPostLabel({ ...p, id: pid }, user?.handle);
+      const cap = (typeof p?.caption === 'string' && p.caption) ? p.caption.trim() : null;
+      const label = cap || pid;
       if (pts.length) series.push({ id: pid, label, color, points: pts, highlighted: selectedPIDs.includes(pid) });
     }
     return series;
@@ -695,7 +547,7 @@ if (typeof browser !== 'undefined' && typeof chrome === 'undefined') {
     return [lo,hi];
   }
 
-  function makeChart(canvas, xAxisLabel = 'Unique viewers', tooltipLabel = 'Unique'){
+  function makeChart(canvas){
     const ctx = canvas.getContext('2d');
     const DPR = Math.max(1, window.devicePixelRatio||1);
     let W = canvas.clientWidth||canvas.width, H = canvas.clientHeight||canvas.height;
@@ -757,7 +609,7 @@ if (typeof browser !== 'undefined' && typeof chrome === 'undefined') {
       }
       // labels
       ctx.fillStyle = '#e8eaed'; ctx.font = 'bold 13px system-ui, -apple-system, Segoe UI, Roboto, Arial';
-      ctx.fillText(xAxisLabel, W/2-50, H-6);
+      ctx.fillText('Unique viewers', W/2-50, H-6);
       ctx.save(); ctx.translate(12, H/2+20); ctx.rotate(-Math.PI/2); ctx.fillText('Interaction rate (%)', 0,0); ctx.restore();
     }
 
@@ -882,13 +734,8 @@ if (typeof browser !== 'undefined' && typeof chrome === 'undefined') {
     function showTooltip(h, clientX, clientY){
       if (!h){ tooltip.style.display='none'; return; }
       tooltip.style.display='block';
-      // Truncate label if longer than 150 chars (allow wrapping to multiple lines)
-      let labelText = h.label || h.pid || '';
-      if (labelText.length > 150) {
-        labelText = labelText.substring(0, 150) + '...';
-      }
-      const header = `<div style="display:flex;align-items:flex-start;gap:6px"><span class="dot" style="background:${h.color};flex-shrink:0;margin-top:2px"></span><strong title="${esc(h.label||h.pid)}" style="word-wrap:break-word;overflow-wrap:break-word">${esc(labelText)}</strong></div>`;
-      const body = `<div>${tooltipLabel}: ${fmt(h.x)} • IR: ${h.y.toFixed(1)}%</div>`;
+      const header = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color}"></span><strong>${esc(h.label||h.pid)}</strong></div>`;
+      const body = `<div>Unique: ${fmt(h.x)} • IR: ${h.y.toFixed(1)}%</div>`;
       tooltip.innerHTML = header + body;
       const vw = window.innerWidth || document.documentElement.clientWidth || 0;
       const width = tooltip.offsetWidth || 0;
@@ -1012,8 +859,7 @@ if (typeof browser !== 'undefined' && typeof chrome === 'undefined') {
     function onHover(cb){ hoverCb = cb; }
     function getZoom(){ return { x: state.zoomX ? [...state.zoomX] : null, y: state.zoomY ? [...state.zoomY] : null }; }
     function setZoom(z){ if (!z) return; if (z.x && isFinite(z.x[0]) && isFinite(z.x[1])) state.zoomX = [z.x[0], z.x[1]]; if (z.y && isFinite(z.y[0]) && isFinite(z.y[1])) state.zoomY = [z.y[0], z.y[1]]; draw(); }
-    function setAxisLabels(xAxis, tooltip){ xAxisLabel = xAxis; tooltipLabel = tooltip; draw(); }
-    return { setData, resetZoom, setHoverSeries, onHover, getZoom, setZoom, setAxisLabels };
+    return { setData, resetZoom, setHoverSeries, onHover, getZoom, setZoom };
   }
 
 function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = 'Views', yFmt = fmt){
@@ -1230,10 +1076,9 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     function showTooltip(h, clientX, clientY, comparisonData){
       if (comparisonData){
         const diff = Math.abs(comparisonData.top.val - comparisonData.bottom.val);
+        const diffRounded = Math.ceil(diff);
         const unit = yAxisLabel || 'Views';
         const unitLower = singularize(unit.toLowerCase());
-        const isViewsPerPerson = unit === 'Views Per Person';
-        const diffFormatted = isViewsPerPerson ? Number(diff).toFixed(2) : fmt(Math.ceil(diff));
         const topColor = comparisonData.top.series.color || '#7dc4ff';
         const bottomColor = comparisonData.bottom.series.color || '#7dc4ff';
         tooltip.style.display='block';
@@ -1242,7 +1087,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             <span class="dot" style="position:absolute;left:0;top:0;width:16px;height:16px;background:${topColor};z-index:2;"></span>
             <span class="dot" style="position:absolute;left:8px;top:0;width:16px;height:16px;background:${bottomColor};z-index:1;"></span>
           </div>
-          <strong>${diffFormatted} ${unitLower} gap</strong>
+          <strong>${fmt(diffRounded)} ${unitLower} gap</strong>
         </div>`;
         const vw = window.innerWidth || document.documentElement.clientWidth || 0;
         const width = tooltip.offsetWidth || 0;
@@ -1261,31 +1106,16 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       if (h.profileUrl) {
         // Extract handle from label (e.g., "@handle's Views" -> "@handle")
         let handle = h.label || h.pid || '';
-        handle = handle.replace(/'s (Views|Likes|Cast in|Followers)$/i, '').trim();
+        handle = handle.replace(/'s (Views|Likes|Cameos|Followers)$/i, '').trim();
         if (!handle.startsWith('@')) handle = '@' + handle;
         const unit = yAxisLabel || 'Views';
         const unitLower = unit.toLowerCase();
         const dateStr = fmtDateTime(h.x);
         // Format number with commas
         const numStr = Math.round(h.y).toLocaleString();
-        // Truncate handle if longer than 150 chars (allow wrapping to multiple lines)
-        let displayHandle = handle;
-        let displayText = `${displayHandle} ${numStr} ${unitLower}`;
-        if (displayText.length > 150) {
-          displayHandle = displayHandle.length > 150 ? displayHandle.substring(0, 150) + '...' : displayHandle;
-          displayText = `${displayHandle} ${numStr} ${unitLower}`;
-          if (displayText.length > 150) {
-            displayText = displayText.substring(0, 150) + '...';
-          }
-        }
-        tooltip.innerHTML = `<div style="display:flex;align-items:flex-start;gap:6px"><span class="dot" style="background:${h.color};flex-shrink:0;margin-top:2px"></span><strong title="${esc(handle)} ${numStr} ${unitLower}" style="word-wrap:break-word;overflow-wrap:break-word">${esc(displayText)}</strong></div><div style="color:#a7b0ba;font-size:11px;margin-top:2px">on ${dateStr}</div>`;
+        tooltip.innerHTML = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color}"></span><strong>${esc(handle)} ${numStr} ${unitLower}</strong></div><div style="color:#a7b0ba;font-size:11px;margin-top:2px">on ${dateStr}</div>`;
       } else {
-        // Truncate label if longer than 150 chars (allow wrapping to multiple lines)
-        let labelText = h.label || h.pid || '';
-        if (labelText.length > 150) {
-          labelText = labelText.substring(0, 150) + '...';
-        }
-        const header = `<div style="display:flex;align-items:flex-start;gap:6px"><span class="dot" style="background:${h.color};flex-shrink:0;margin-top:2px"></span><strong title="${esc(h.label||h.pid)}" style="word-wrap:break-word;overflow-wrap:break-word">${esc(labelText)}</strong></div>`;
+        const header = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color}"></span><strong>${esc(h.label||h.pid)}</strong></div>`;
         const unit = yAxisLabel || 'Views';
         const body = `<div>${fmtDateTime(h.x)} • ${unit}: ${yFmt(h.y)}</div>`;
         tooltip.innerHTML = header + body;
@@ -1446,8 +1276,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     function onHover(cb){ hoverCb=cb; }
     function getZoom(){ return { x: state.zoomX ? [...state.zoomX] : null, y: state.zoomY ? [...state.zoomY] : null }; }
     function setZoom(z){ if (!z) return; if (z.x && isFinite(z.x[0]) && isFinite(z.x[1])) state.zoomX = [z.x[0], z.x[1]]; if (z.y && isFinite(z.y[0]) && isFinite(z.y[1])) state.zoomY = [z.y[0], z.y[1]]; draw(); }
-    function setYAxisLabel(label){ yAxisLabel = label; draw(); }
-    return { setData, resetZoom, setHoverSeries, onHover, getZoom, setZoom, setYAxisLabel };
+    return { setData, resetZoom, setHoverSeries, onHover, getZoom, setZoom };
   }
 
   // First 24 hours views chart (x-axis = minutes since post creation, y-axis = views)
@@ -1670,10 +1499,9 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     function showTooltip(h, clientX, clientY, comparisonData){
       if (comparisonData){
         const diff = Math.abs(comparisonData.top.val - comparisonData.bottom.val);
+        const diffRounded = Math.ceil(diff);
         const unit = yAxisLabel || 'Views';
         const unitLower = singularize(unit.toLowerCase());
-        const isViewsPerPerson = unit === 'Views Per Person';
-        const diffFormatted = isViewsPerPerson ? Number(diff).toFixed(2) : fmt(Math.ceil(diff));
         const topColor = comparisonData.top.series.color || '#7dc4ff';
         const bottomColor = comparisonData.bottom.series.color || '#7dc4ff';
         tooltip.style.display='block';
@@ -1682,7 +1510,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             <span class="dot" style="position:absolute;left:0;top:0;width:16px;height:16px;background:${topColor};z-index:2;"></span>
             <span class="dot" style="position:absolute;left:8px;top:0;width:16px;height:16px;background:${bottomColor};z-index:1;"></span>
           </div>
-          <strong>${diffFormatted} ${unitLower} gap</strong>
+          <strong>${fmt(diffRounded)} ${unitLower} gap</strong>
         </div>`;
         const vw = window.innerWidth || document.documentElement.clientWidth || 0;
         const width = tooltip.offsetWidth || 0;
@@ -1699,25 +1527,15 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       tooltip.style.display='block';
       if (h.profileUrl) {
         let handle = h.label || h.pid || '';
-        handle = handle.replace(/'s (Views|Likes|Cast in|Followers)$/i, '').trim();
+        handle = handle.replace(/'s (Views|Likes|Cameos|Followers)$/i, '').trim();
         if (!handle.startsWith('@')) handle = '@' + handle;
         const unit = yAxisLabel || 'Unique Views';
         const unitLower = unit.toLowerCase();
         const timeStr = fmtTime(h.minutesSinceCreation || 0);
         const numStr = Math.round(h.y).toLocaleString();
-        // Truncate if longer than 150 chars (allow wrapping to multiple lines)
-        let displayText = `${handle} ${numStr} ${unitLower}`;
-        if (displayText.length > 150) {
-          displayText = displayText.substring(0, 150) + '...';
-        }
-        tooltip.innerHTML = `<div style="display:flex;align-items:flex-start;gap:6px"><span class="dot" style="background:${h.color};flex-shrink:0;margin-top:2px"></span><strong title="${esc(handle)} ${numStr} ${unitLower}" style="word-wrap:break-word;overflow-wrap:break-word">${esc(displayText)}</strong></div><div style="color:#a7b0ba;font-size:11px;margin-top:2px">${timeStr} after creation</div>`;
+        tooltip.innerHTML = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color}"></span><strong>${esc(handle)} ${numStr} ${unitLower}</strong></div><div style="color:#a7b0ba;font-size:11px;margin-top:2px">${timeStr} after creation</div>`;
       } else {
-        // Truncate label if longer than 150 chars (allow wrapping to multiple lines)
-        let labelText = h.label || h.pid || '';
-        if (labelText.length > 150) {
-          labelText = labelText.substring(0, 150) + '...';
-        }
-        const header = `<div style="display:flex;align-items:flex-start;gap:6px"><span class="dot" style="background:${h.color};flex-shrink:0;margin-top:2px"></span><strong title="${esc(h.label||h.pid)}" style="word-wrap:break-word;overflow-wrap:break-word">${esc(labelText)}</strong></div>`;
+        const header = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color}"></span><strong>${esc(h.label||h.pid)}</strong></div>`;
         const unit = yAxisLabel || 'Unique Views';
         const timeStr = fmtTime(h.minutesSinceCreation || 0);
         const body = `<div>${timeStr} after creation • ${unit}: ${yFmt(h.y)}</div>`;
@@ -1868,8 +1686,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     function onHover(cb){ hoverCb=cb; }
     function getZoom(){ return { x: state.zoomX ? [...state.zoomX] : null, y: state.zoomY ? [...state.zoomY] : null }; }
     function setZoom(z){ if (!z) return; if (z.x && isFinite(z.x[0]) && isFinite(z.x[1])) state.zoomX = [z.x[0], z.x[1]]; if (z.y && isFinite(z.y[0]) && isFinite(z.y[1])) state.zoomY = [z.y[0], z.y[1]]; draw(); }
-    function setYAxisLabel(label){ yAxisLabel = label; draw(); }
-    return { setData, resetZoom, setHoverSeries, onHover, getZoom, setZoom, setYAxisLabel };
+    return { setData, resetZoom, setHoverSeries, onHover, getZoom, setZoom };
   }
 
   // Followers time chart (multi-series, Y-axis = Followers)
@@ -2449,12 +2266,12 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         }
       }
       
-      // === SHEET 4: User Cast in History ===
+      // === SHEET 4: User Cameos History ===
       allLines.push('');
-      allLines.push('=== USER CAST IN HISTORY (Complete Timeline) ===');
+      allLines.push('=== USER CAMEOS HISTORY (Complete Timeline) ===');
       const cameosHeader = [
         'User Key', 'User Handle', 'User ID',
-        'Timestamp', 'Timestamp (ISO)', 'Cast in Count', 'Cast in Change', 'Days Since First'
+        'Timestamp', 'Timestamp (ISO)', 'Cameo Count', 'Cameo Change', 'Days Since First'
       ];
       allLines.push(cameosHeader.map(escapeCSV).join(','));
       
@@ -2474,11 +2291,11 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           
           if (firstTimestamp === null && t) firstTimestamp = t;
           const daysSinceFirst = firstTimestamp && t ? ((t - firstTimestamp) / (24 * 60 * 60 * 1000)).toFixed(2) : '';
-          const castInChange = prevCount != null && count !== '' ? (Number(count) - Number(prevCount)) : '';
+          const cameoChange = prevCount != null && count !== '' ? (Number(count) - Number(prevCount)) : '';
           
           allLines.push([
             userKey, handle, userId,
-            tFormatted, tISO, count, castInChange, daysSinceFirst
+            tFormatted, tISO, count, cameoChange, daysSinceFirst
           ].map(escapeCSV).join(','));
           
           if (count !== '') prevCount = Number(count);
@@ -2492,7 +2309,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         'User Key', 'User Handle', 'User ID', 
         'Post Count', 'Total Snapshots',
         'Latest Follower Count', 'Latest Follower Timestamp', 'Follower History Points',
-        'Latest Cast in Count', 'Latest Cast in Timestamp', 'Cast in History Points',
+        'Latest Cameo Count', 'Latest Cameo Timestamp', 'Cameo History Points',
         'Total Views (Latest)', 'Total Likes (Latest)', 'Total Comments (Latest)', 'Total Remixes (Latest)',
         'Total Interactions (Latest)', 'Average Interaction Rate %', 'Average Remix Rate %',
         'First Post Time', 'Last Post Time', 'Post Time Span (days)'
@@ -2669,7 +2486,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             currentSection = 'snapshots';
           } else if (line.includes('USER FOLLOWERS HISTORY')) {
             currentSection = 'followers';
-          } else if (line.includes('USER CAST IN HISTORY')) {
+          } else if (line.includes('USER CAMEOS HISTORY')) {
             currentSection = 'cameos';
           } else if (line.includes('USERS SUMMARY')) {
             currentSection = 'users_summary';
@@ -2704,7 +2521,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         `Posts: ${stats.postsAdded} added, ${stats.postsUpdated} updated\n` +
         `Snapshots: ${stats.snapshotsAdded} added, ${stats.snapshotsSkipped} skipped (duplicates)\n` +
         `Followers: ${stats.followersAdded} added, ${stats.followersSkipped} skipped (duplicates)\n` +
-        `Cast in: ${stats.cameosAdded} added, ${stats.cameosSkipped} skipped (duplicates)\n` +
+        `Cameos: ${stats.cameosAdded} added, ${stats.cameosSkipped} skipped (duplicates)\n` +
         `Users: ${stats.usersAdded} added, ${stats.usersUpdated} updated`;
       
       alert(message);
@@ -2930,7 +2747,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         const timestamp = parseTimestamp(timestampISO);
         if (!timestamp) continue;
         
-        const count = getCol('Cast in Count');
+        const count = getCol('Cameo Count');
         if (count === '') continue;
         
         const existingEntry = user.cameos.find(c => c.t === timestamp);
@@ -2969,16 +2786,13 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       if (lastUserKey && metrics.users[lastUserKey]) currentUserKey = lastUserKey;
     } catch {}
     const selEl = $('#userSelect'); if (currentUserKey) selEl.value = currentUserKey;
-    let viewsChartType = 'unique'; // 'unique' or 'total'
-    const compareViewsChartType = 'total'; // Always use total views for compare section
-    let chart = makeChart($('#chart'), 'Unique viewers', 'Unique');
-    let viewsPerPersonChart = makeFirst24HoursChart($('#viewsPerPersonChart'), '#viewsPerPersonTooltip', 'Views Per Person', (v) => Number(v).toFixed(2));
-    let viewsChart = makeTimeChart($('#viewsChart'), '#viewsTooltip', 'Unique Views', fmt);
-    let first24HoursChart = makeFirst24HoursChart($('#first24HoursChart'), '#first24HoursTooltip', 'Unique Views', fmt);
+    const chart = makeChart($('#chart'));
+    const viewsChart = makeTimeChart($('#viewsChart'), '#viewsTooltip', 'Views', fmt);
+    const first24HoursChart = makeFirst24HoursChart($('#first24HoursChart'), '#first24HoursTooltip', 'Unique Views', fmt);
     const followersChart = makeFollowersChart($('#followersChart'));
-    let allViewsChart = makeTimeChart($('#allViewsChart'), '#allViewsTooltip', 'Total Views', fmt2);
+    const allViewsChart = makeTimeChart($('#allViewsChart'), '#allViewsTooltip', 'Views', fmt2);
     const allLikesChart = makeTimeChart($('#allLikesChart'), '#allLikesTooltip', 'Likes', fmt2);
-    const cameosChart = makeTimeChart($('#cameosChart'), '#cameosTooltip', 'Cast in', fmt2);
+    const cameosChart = makeTimeChart($('#cameosChart'), '#cameosTooltip', 'Cameos', fmt2);
     // Load persisted zoom states
     let zoomStates = {};
     try { const st = await chrome.storage.local.get('zoomStates'); zoomStates = st.zoomStates || {}; } catch {}
@@ -2988,7 +2802,6 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       const st = await chrome.storage.local.get('visibilityByUser');
       visibilityByUser = st.visibilityByUser || {};
     } catch {}
-    let pendingPostPurge = null;
     
     // Compare users state
     const compareUsers = new Set();
@@ -3075,7 +2888,6 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       
       // Update allViewsChart
       try {
-        const useUnique = compareViewsChartType === 'unique';
         const allSeries = [];
         userKeys.forEach((userKey, idx)=>{
           const user = metrics.users[userKey];
@@ -3084,8 +2896,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             const events = [];
             for (const [pid, p] of Object.entries(user.posts||{})){
               for (const s of (p.snapshots||[])){
-                const t = Number(s.t);
-                const v = useUnique ? Number(s.uv) : Number(s.views);
+                const t = Number(s.t), v = Number(s.views);
                 if (isFinite(t) && isFinite(v)) events.push({ t, v, pid });
               }
             }
@@ -3107,12 +2918,9 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             const color = COLORS[idx % COLORS.length];
             const handle = user.handle || userKey;
             const profileUrl = handle ? `${SITE_ORIGIN}/profile/${handle}` : null;
-            const label = useUnique ? `@${handle}'s Unique Views` : `@${handle}'s Total Views`;
-            allSeries.push({ id: userKey, label, color, points: pts, profileUrl });
+            allSeries.push({ id: userKey, label: `@${handle}'s Views`, color, points: pts, profileUrl });
           }
         });
-        const yAxisLabel = useUnique ? 'Unique Views' : 'Total Views';
-        allViewsChart.setYAxisLabel(yAxisLabel);
         allViewsChart.setData(allSeries);
       } catch {}
 
@@ -3166,7 +2974,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             const color = COLORS[idx % COLORS.length];
             const handle = user.handle || userKey;
             const profileUrl = handle ? `${SITE_ORIGIN}/profile/${handle}` : null;
-            allSeries.push({ id: userKey, label: `@${handle}'s Cast in`, color, points: pts, profileUrl });
+            allSeries.push({ id: userKey, label: `@${handle}'s Cameos`, color, points: pts, profileUrl });
           }
         });
         cameosChart.setData(allSeries);
@@ -3193,8 +3001,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       // Update metric cards with aggregated totals across all compared users
       try {
         const totals = computeTotalsForUsers(userKeys, metrics);
-        const allTotalViewsEl = $('#allTotalViewsTotal'); if (allTotalViewsEl) allTotalViewsEl.textContent = fmt2(totals.views);
-        const allUniqueViewsEl = $('#allUniqueViewsTotal'); if (allUniqueViewsEl) allUniqueViewsEl.textContent = fmt2(totals.uniqueViews);
+        const allViewsEl = $('#allViewsTotal'); if (allViewsEl) allViewsEl.textContent = fmt2(totals.views);
         const allLikesEl = $('#allLikesTotal'); if (allLikesEl) allLikesEl.textContent = fmt2(totals.likes);
         const allRepliesEl = $('#allRepliesTotal'); if (allRepliesEl) allRepliesEl.textContent = fmtK2OrInt(totals.replies);
         const allRemixesEl = $('#allRemixesTotal'); if (allRemixesEl) allRemixesEl.textContent = fmt2(totals.remixes);
@@ -3851,56 +3658,17 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       const user = metrics.users[currentUserKey];
       if (!user) return;
       const colorFor = makeColorMap(user);
-      const useUnique = viewsChartType === 'unique';
       const f24Series = (function(){
         const out=[]; for (const [pid,p] of Object.entries(user.posts||{})){
           if (!visibleSet.has(pid)) continue;
           const postTime = getPostTimeStrict(p);
           if (!postTime) continue; // Skip posts without creation time (can't calculate time since creation)
-          const pts=[]; for (const s of (p.snapshots||[])){ 
-            const t=s.t; 
-            const v=useUnique ? s.uv : s.views; 
-            if (t!=null && v!=null) pts.push({ x:Number(t), y:Number(v), t:Number(t) }); 
-          }
-          const color=colorFor(pid); const label = buildPostLabel({ ...p, id: pid }, user?.handle);
+          const pts=[]; for (const s of (p.snapshots||[])){ const t=s.t; const v=s.uv; if (t!=null && v!=null) pts.push({ x:Number(t), y:Number(v), t:Number(t) }); }
+          const color=colorFor(pid); const label = (typeof p?.caption==='string'&&p.caption)?p.caption.trim():pid;
           // Include all posts with post_time, even if they have no snapshots or no snapshots in the time window
           out.push({ id: pid, label, color, points: pts, url: absUrl(p.url, pid), postTime: postTime }); }
         return out; })();
-      const yAxisLabel = useUnique ? 'Unique Views' : 'Total Views';
       first24HoursChart.setData(f24Series, timeWindowMinutes);
-      // Update chart label by recreating it with new label
-      const canvas = $('#first24HoursChart');
-      if (canvas) {
-        // The chart function doesn't expose a way to change the label, so we need to update it internally
-        // For now, we'll just update the data and the chart will use the label from when it was created
-        // We'll need to recreate the chart or modify makeFirst24HoursChart to accept label updates
-      }
-    }
-
-    function updateViewsPerPersonChart(timeWindowMinutes){
-      const user = metrics.users[currentUserKey];
-      if (!user) return;
-      const colorFor = makeColorMap(user);
-      const vppSeries = (function(){
-        const out=[]; for (const [pid,p] of Object.entries(user.posts||{})){
-          if (!visibleSet.has(pid)) continue;
-          const postTime = getPostTimeStrict(p);
-          if (!postTime) continue; // Skip posts without creation time (can't calculate time since creation)
-          const pts=[]; for (const s of (p.snapshots||[])){ 
-            const t=s.t; 
-            const totalViews = num(s.views);
-            const uniqueViews = num(s.uv);
-            // Only include if we have both values and unique views > 0
-            if (t!=null && totalViews!=null && uniqueViews!=null && uniqueViews > 0) {
-              const vpp = Number((totalViews / uniqueViews).toFixed(2));
-              pts.push({ x:Number(t), y:vpp, t:Number(t) }); 
-            }
-          }
-          const color=colorFor(pid); const label = buildPostLabel({ ...p, id: pid }, user?.handle);
-          // Include all posts with post_time, even if they have no snapshots or no snapshots in the time window
-          out.push({ id: pid, label, color, points: pts, url: absUrl(p.url, pid), postTime: postTime }); }
-        return out; })();
-      viewsPerPersonChart.setData(vppSeries, timeWindowMinutes);
     }
 
     async function refreshUserUI(opts={}){
@@ -3938,33 +3706,18 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           }
         }
       }
-      buildPostsList(user, colorFor, visibleSet, { 
-        onHover: (pid)=> { chart.setHoverSeries(pid); viewsChart.setHoverSeries(pid); first24HoursChart.setHoverSeries(pid); viewsPerPersonChart.setHoverSeries(pid); },
-        onPurge: (pid, snippet) => showPostPurgeConfirm(snippet, pid)
-      });
-      const useUnique = viewsChartType === 'unique';
-      const series = computeSeriesForUser(user, [], colorFor, useUnique)
+      buildPostsList(user, colorFor, visibleSet, { onHover: (pid)=> { chart.setHoverSeries(pid); viewsChart.setHoverSeries(pid); first24HoursChart.setHoverSeries(pid); } });
+      const series = computeSeriesForUser(user, [], colorFor)
         .filter(s=>visibleSet.has(s.id))
         .map(s=>({ ...s, url: absUrl(user.posts?.[s.id]?.url, s.id) }));
       chart.setData(series);
       // Time chart: cumulative views by time
       const vSeries = (function(){
         const out=[]; for (const [pid,p] of Object.entries(user.posts||{})){
-          if (!visibleSet.has(pid)) continue; 
-          const pts=[]; 
-          for (const s of (p.snapshots||[])){ 
-            const t=s.t; 
-            const v=useUnique ? s.uv : s.views; 
-            if (t!=null && v!=null) pts.push({ x:Number(t), y:Number(v), t:Number(t) }); 
-          }
-          const color=colorFor(pid); 
-          const label = buildPostLabel({ ...p, id: pid }, user?.handle); 
-          if (pts.length) out.push({ id: pid, label, color, points: pts, url: absUrl(p.url, pid) }); 
-        }
+          if (!visibleSet.has(pid)) continue; const pts=[]; for (const s of (p.snapshots||[])){ const t=s.t; const v=s.views; if (t!=null && v!=null) pts.push({ x:Number(t), y:Number(v), t:Number(t) }); }
+          const color=colorFor(pid); const label = (typeof p?.caption==='string'&&p.caption)?p.caption.trim():pid; if (pts.length) out.push({ id: pid, label, color, points: pts, url: absUrl(p.url, pid) }); }
         return out; })();
       viewsChart.setData(vSeries);
-      // Views Per Person chart: total views / unique views over time since post creation
-      updateViewsPerPersonChart(parseInt($('#viewsPerPersonSlider')?.value) || 1440);
       // First 24 hours chart: views over time since post creation
       updateFirst24HoursChart(parseInt($('#first24HoursSlider')?.value) || 1440);
       // Only update compare charts if no compare users are selected
@@ -3972,8 +3725,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         // Update unfiltered totals cards for single user
         try {
           const t = computeTotalsForUser(user);
-          const allTotalViewsEl = $('#allTotalViewsTotal'); if (allTotalViewsEl) allTotalViewsEl.textContent = fmt2(t.views);
-          const allUniqueViewsEl = $('#allUniqueViewsTotal'); if (allUniqueViewsEl) allUniqueViewsEl.textContent = fmt2(t.uniqueViews);
+          const allViewsEl = $('#allViewsTotal'); if (allViewsEl) allViewsEl.textContent = fmt2(t.views);
           const allLikesEl = $('#allLikesTotal'); if (allLikesEl) allLikesEl.textContent = fmt2(t.likes);
           const allRepliesEl = $('#allRepliesTotal'); if (allRepliesEl) allRepliesEl.textContent = fmtK2OrInt(t.replies);
           const allRemixesEl = $('#allRemixesTotal'); if (allRemixesEl) allRemixesEl.textContent = fmt2(t.remixes);
@@ -4021,13 +3773,11 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         } catch {}
         // All posts cumulative views (unfiltered): aggregate across all posts
         try {
-          const useUnique = compareViewsChartType === 'unique';
           const pts = (function(){
             const events = [];
             for (const [pid, p] of Object.entries(user.posts||{})){
               for (const s of (p.snapshots||[])){
-                const t = Number(s.t);
-                const v = useUnique ? Number(s.uv) : Number(s.views);
+                const t = Number(s.t), v = Number(s.views);
                 if (isFinite(t) && isFinite(v)) events.push({ t, v, pid });
               }
             }
@@ -4046,18 +3796,15 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             return out;
           })();
           const color = '#7dc4ff';
-          const label = useUnique ? 'Unique Views' : 'Total Views';
-          const series = pts.length ? [{ id: 'all_posts', label, color, points: pts }] : [];
-          const yAxisLabel = useUnique ? 'Unique Views' : 'Total Views';
-          allViewsChart.setYAxisLabel(yAxisLabel);
+          const series = pts.length ? [{ id: 'all_posts', label: 'Views', color, points: pts }] : [];
           allViewsChart.setData(series);
         } catch {}
-        // Cast in chart: use user-level cast in count history when available
+        // Cameos chart: use user-level cameo count history when available
         const cSeries = (function(){
           const arr = Array.isArray(user.cameos) ? user.cameos : [];
           const pts = arr.map(it=>({ x:Number(it.t), y:Number(it.count), t:Number(it.t) })).filter(p=>isFinite(p.x)&&isFinite(p.y));
           const color = '#95e06c';
-          return pts.length ? [{ id: 'cameos', label: 'Cast in', color, points: pts }] : [];
+          return pts.length ? [{ id: 'cameos', label: 'Cameos', color, points: pts }] : [];
         })();
         cameosChart.setData(cSeries);
         // Followers chart: use user-level follower history when available
@@ -4076,7 +3823,6 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         try {
           const z = zoomStates[currentUserKey] || {};
           if (z.scatter) chart.setZoom(z.scatter);
-          if (z.viewsPerPerson) viewsPerPersonChart.setZoom(z.viewsPerPerson);
           if (z.views) viewsChart.setZoom(z.views);
           if (z.first24Hours) first24HoursChart.setZoom(z.first24Hours);
           if (z.likesAll) allLikesChart.setZoom(z.likesAll);
@@ -4085,12 +3831,8 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           if (z.viewsAll) allViewsChart.setZoom(z.viewsAll);
         } catch {}
       }
-      // Sync chart hover back to list - use current chart instances
-      const currentChart = chart;
-      const currentViewsPerPersonChart = viewsPerPersonChart;
-      const currentViewsChart = viewsChart;
-      const currentFirst24HoursChart = first24HoursChart;
-      currentChart.onHover((pid)=>{
+      // Sync chart hover back to list
+      chart.onHover((pid)=>{
         const wrap = $('#posts');
         if (!wrap) return;
         if (pid){
@@ -4100,33 +3842,22 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           wrap.classList.remove('is-hovering');
           $$('.post', wrap).forEach(r=>r.classList.remove('hover'));
         }
-        currentViewsPerPersonChart.setHoverSeries(pid);
-        currentViewsChart.setHoverSeries(pid);
-        currentFirst24HoursChart.setHoverSeries(pid);
+        viewsChart.setHoverSeries(pid);
+        first24HoursChart.setHoverSeries(pid);
       });
-      currentViewsPerPersonChart.onHover((pid)=>{
+      viewsChart.onHover((pid)=>{
         const wrap = $('#posts'); if (!wrap) return;
         if (pid){ wrap.classList.add('is-hovering'); $$('.post', wrap).forEach(r=>{ if (r.dataset.pid===pid) r.classList.add('hover'); else r.classList.remove('hover'); }); }
         else { wrap.classList.remove('is-hovering'); $$('.post', wrap).forEach(r=>r.classList.remove('hover')); }
-        currentChart.setHoverSeries(pid);
-        currentViewsChart.setHoverSeries(pid);
-        currentFirst24HoursChart.setHoverSeries(pid);
+        chart.setHoverSeries(pid);
+        first24HoursChart.setHoverSeries(pid);
       });
-      currentViewsChart.onHover((pid)=>{
+      first24HoursChart.onHover((pid)=>{
         const wrap = $('#posts'); if (!wrap) return;
         if (pid){ wrap.classList.add('is-hovering'); $$('.post', wrap).forEach(r=>{ if (r.dataset.pid===pid) r.classList.add('hover'); else r.classList.remove('hover'); }); }
         else { wrap.classList.remove('is-hovering'); $$('.post', wrap).forEach(r=>r.classList.remove('hover')); }
-        currentChart.setHoverSeries(pid);
-        currentViewsPerPersonChart.setHoverSeries(pid);
-        currentFirst24HoursChart.setHoverSeries(pid);
-      });
-      currentFirst24HoursChart.onHover((pid)=>{
-        const wrap = $('#posts'); if (!wrap) return;
-        if (pid){ wrap.classList.add('is-hovering'); $$('.post', wrap).forEach(r=>{ if (r.dataset.pid===pid) r.classList.add('hover'); else r.classList.remove('hover'); }); }
-        else { wrap.classList.remove('is-hovering'); $$('.post', wrap).forEach(r=>r.classList.remove('hover')); }
-        currentChart.setHoverSeries(pid);
-        currentViewsPerPersonChart.setHoverSeries(pid);
-        currentViewsChart.setHoverSeries(pid);
+        chart.setHoverSeries(pid);
+        viewsChart.setHoverSeries(pid);
       });
       // wire visibility toggles
       $$('#posts .toggle').forEach(btn=>{
@@ -4136,63 +3867,43 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           else { visibleSet.add(pid); row.classList.remove('hidden'); btn.textContent='Hide'; }
           // Fit to visible
           chart.resetZoom();
-          viewsPerPersonChart.resetZoom();
-          const useUnique = viewsChartType === 'unique';
-          chart.setData(computeSeriesForUser(user, [], colorFor, useUnique).filter(s=>visibleSet.has(s.id)).map(s=>({ ...s, url: absUrl(user.posts?.[s.id]?.url, s.id) })));
+          chart.setData(computeSeriesForUser(user, [], colorFor).filter(s=>visibleSet.has(s.id)).map(s=>({ ...s, url: absUrl(user.posts?.[s.id]?.url, s.id) })));
           // Refresh the cumulative views time series to reflect current visibility
           const vSeries = (function(){
             const out=[]; for (const [vpid,p] of Object.entries(user.posts||{})){
               if (!visibleSet.has(vpid)) continue; const pts=[];
               for (const s of (p.snapshots||[])){
-                const t=s.t; const v=useUnique ? s.uv : s.views; if (t!=null && v!=null) pts.push({ x:Number(t), y:Number(v), t:Number(t) });
+                const t=s.t; const v=s.views; if (t!=null && v!=null) pts.push({ x:Number(t), y:Number(v), t:Number(t) });
               }
-              const color=colorFor(vpid); const label=buildPostLabel({ ...p, id: vpid }, user?.handle); if (pts.length) out.push({ id: vpid, label, color, points: pts, url: absUrl(p.url, vpid) });
+              const color=colorFor(vpid); const label=(typeof p?.caption==='string'&&p.caption)?p.caption.trim():vpid; if (pts.length) out.push({ id: vpid, label, color, points: pts, url: absUrl(p.url, vpid) });
             }
             return out; })();
           viewsChart.setData(vSeries);
-          // Refresh Views Per Person chart
-          updateViewsPerPersonChart(parseInt($('#viewsPerPersonSlider')?.value) || 1440);
           // Update first 24 hours chart
           updateFirst24HoursChart(parseInt($('#first24HoursSlider')?.value) || 1440);
           // (likes total chart is unfiltered; no need to refresh here)
           // Update metric cards to reflect current visibility
           try{
-            const uniqueViewsEl = $('#uniqueViewsTotal');
-            const totalViewsEl = $('#totalViewsTotal');
+            const viewsEl = $('#viewsTotal');
             const likesEl = $('#likesTotal');
             const repliesEl = $('#repliesTotal');
             const remixesEl = $('#remixesTotal');
             const interEl = $('#interactionsTotal');
-            const cameosEl = $('#cameosTotal');
-            const followersEl = $('#followersTotal');
-            let totalUniqueViews = 0, totalViews = 0, totalLikes = 0, totalReplies = 0, totalRemixes = 0, totalInteractions = 0;
+            let totalViews = 0, totalLikes = 0, totalReplies = 0, totalRemixes = 0, totalInteractions = 0;
             for (const vpid of Array.from(visibleSet)){
               const post = user.posts?.[vpid];
               const last = latestSnapshot(post?.snapshots);
-              totalUniqueViews += num(last?.uv);
               totalViews += num(last?.views);
               totalLikes += num(last?.likes);
               totalReplies += num(last?.comments);
               totalRemixes += num(latestRemixCountForPost(post));
               totalInteractions += interactionsOfSnap(last);
             }
-            if (uniqueViewsEl) uniqueViewsEl.textContent = fmt2(totalUniqueViews);
-            if (totalViewsEl) totalViewsEl.textContent = fmt2(totalViews);
+            if (viewsEl) viewsEl.textContent = fmt2(totalViews);
             if (likesEl) likesEl.textContent = fmt2(totalLikes);
             if (repliesEl) repliesEl.textContent = fmtK2OrInt(totalReplies);
             if (remixesEl) remixesEl.textContent = fmt2(totalRemixes);
             if (interEl) interEl.textContent = fmt2(totalInteractions);
-            // Update cameos and followers from user data (not post data)
-            if (cameosEl) {
-              const cameosArr = Array.isArray(user.cameos) ? user.cameos : [];
-              const lastCameo = cameosArr.length > 0 ? cameosArr[cameosArr.length - 1] : null;
-              cameosEl.textContent = lastCameo ? fmtK2OrInt(lastCameo.count) : '0';
-            }
-            if (followersEl) {
-              const followersArr = Array.isArray(user.followers) ? user.followers : [];
-              const lastFollower = followersArr.length > 0 ? followersArr[followersArr.length - 1] : null;
-              followersEl.textContent = lastFollower ? fmtK2OrInt(lastFollower.count) : '0';
-            }
           } catch {}
           persistVisibility();
         });
@@ -4207,7 +3918,6 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       if (u) {
         Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid));
         chart.resetZoom();
-        viewsPerPersonChart.resetZoom();
         viewsChart.resetZoom();
         followersChart.resetZoom();
         allViewsChart.resetZoom();
@@ -4226,57 +3936,6 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       refreshUserUI({ preserveEmpty: true });
       persistVisibility();
     });
-
-    // Views type toggle pills
-    let isUpdatingViewsType = false; // Prevent recursive calls
-    function updateViewsType(type){
-      // Prevent accidental calls or recursive updates
-      if (isUpdatingViewsType || viewsChartType === type) return;
-      isUpdatingViewsType = true;
-      
-      try {
-        viewsChartType = type;
-        const uniquePill = $('#uniqueViewsPill');
-        const totalPill = $('#totalViewsPill');
-        if (uniquePill && totalPill) {
-          if (type === 'unique') {
-            uniquePill.classList.add('active');
-            totalPill.classList.remove('active');
-          } else {
-            uniquePill.classList.remove('active');
-            totalPill.classList.add('active');
-          }
-        }
-      // Update chart labels
-      const yAxisLabel = type === 'unique' ? 'Unique Views' : 'Total Views';
-      const xAxisLabel = type === 'unique' ? 'Unique viewers' : 'Total viewers';
-      const tooltipLabel = type === 'unique' ? 'Unique' : 'Total';
-      
-      chart.setAxisLabels(xAxisLabel, tooltipLabel);
-      viewsChart.setYAxisLabel(yAxisLabel);
-      first24HoursChart.setYAxisLabel(yAxisLabel);
-      
-      // Immediately clear data to prevent hovering over stale data from wrong mode
-      chart.setData([]);
-      viewsChart.setData([]);
-      first24HoursChart.setData([]);
-      
-      // Refresh the UI to update chart data
-        refreshUserUI({ skipRestoreZoom: true });
-      } finally {
-        isUpdatingViewsType = false;
-      }
-    }
-
-    $('#uniqueViewsPill').addEventListener('click', (e)=>{
-      e.stopPropagation();
-      if (viewsChartType !== 'unique') updateViewsType('unique');
-    });
-    $('#totalViewsPill').addEventListener('click', (e)=>{
-      e.stopPropagation();
-      if (viewsChartType !== 'total') updateViewsType('total');
-    });
-
 
     // Typeahead suggestions
     $('#search').addEventListener('input', (e)=>{
@@ -4387,37 +4046,18 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     const followerCountValue = $('#followerCountValue');
     const purgeReviewText = $('#purgeReviewText');
     const purgeConfirmText = $('#purgeConfirmText');
-    const purgeStorageSize = $('#purgeStorageSize');
     const dateRangeFill = $('#dateRangeFill');
     const postCountFill = $('#postCountFill');
     const followerCountFill = $('#followerCountFill');
-    const postPurgeConfirmDialog = $('#postPurgeConfirm');
-    const postPurgeConfirmText = $('#postPurgeConfirmText');
-    const postPurgeConfirmYes = $('#postPurgeConfirmYes');
-    const postPurgeConfirmNo = $('#postPurgeConfirmNo');
     
-    function showPostPurgeConfirm(snippet, pid){
-      pendingPostPurge = { pid, userKey: currentUserKey, caption: snippet };
-      if (postPurgeConfirmText) postPurgeConfirmText.textContent = `Are you sure you want to purge data tied to "${snippet}"?`;
-      if (postPurgeConfirmDialog){
-        postPurgeConfirmDialog.style.display = 'flex';
-      } else {
-        alert(`Are you sure you want to purge data tied to "${snippet}"?`);
-      }
-    }
+    // Exemptions state
+    const exemptedUsers = new Set();
+    const MAX_EXEMPTED_USERS = 50;
+    const EXEMPTIONS_STORAGE_KEY = 'purgeExemptions';
 
-    // Exceptions state
-    const exceptedUsers = new Set();
-    const MAX_EXCEPTED_USERS = 50;
-    const EXCEPTIONS_STORAGE_KEY = 'purgeExceptions';
-    const COMB_MODE_STORAGE_KEY = 'combModeEnabled';
-    const COMB_MODE_LAST_RUN_KEY = 'combModeLastRun';
-    let combModeEnabled = true; // Default to enabled
-    let combModeDailyTimer = null;
-
-    async function loadExceptedUsers(){
+    async function loadExemptedUsers(){
       try {
-        const { [EXCEPTIONS_STORAGE_KEY]: saved = [] } = await chrome.storage.local.get(EXCEPTIONS_STORAGE_KEY);
+        const { [EXEMPTIONS_STORAGE_KEY]: saved = [] } = await chrome.storage.local.get(EXEMPTIONS_STORAGE_KEY);
         if (Array.isArray(saved)) {
           // Validate that users still exist in metrics
           const valid = saved.filter(userKey => metrics.users && metrics.users[userKey]);
@@ -4427,150 +4067,10 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       return new Set();
     }
 
-    async function saveExceptedUsers(){
+    async function saveExemptedUsers(){
       try {
-        await chrome.storage.local.set({ [EXCEPTIONS_STORAGE_KEY]: Array.from(exceptedUsers) });
+        await chrome.storage.local.set({ [EXEMPTIONS_STORAGE_KEY]: Array.from(exemptedUsers) });
       } catch {}
-    }
-
-    async function loadCombModePreference(){
-      try {
-        const { [COMB_MODE_STORAGE_KEY]: saved } = await chrome.storage.local.get(COMB_MODE_STORAGE_KEY);
-        if (typeof saved === 'boolean') {
-          combModeEnabled = saved;
-        }
-      } catch {}
-      return combModeEnabled;
-    }
-
-    async function saveCombModePreference(){
-      try {
-        await chrome.storage.local.set({ [COMB_MODE_STORAGE_KEY]: combModeEnabled });
-      } catch {}
-    }
-
-    async function updateStorageSizeDisplay(){
-      try {
-        // Get all storage data to calculate total size
-        const allData = await chrome.storage.local.get(null);
-        // Convert to JSON string to calculate byte size
-        const jsonString = JSON.stringify(allData);
-        const bytes = new Blob([jsonString]).size;
-        // Convert to MB with 2 decimal places
-        const mb = (bytes / (1024 * 1024)).toFixed(2);
-        if (purgeStorageSize) {
-          purgeStorageSize.textContent = `Sora Creator Tools currently uses ${mb}MB of memory.`;
-        }
-      } catch (e) {
-        console.error('[Dashboard] Failed to calculate storage size', e);
-        if (purgeStorageSize) {
-          purgeStorageSize.textContent = 'Sora Creator Tools currently uses 0.00MB of memory.';
-        }
-      }
-    }
-
-    async function runCombModePurge(){
-      if (!combModeEnabled) return;
-      
-      await chrome.storage.local.set({ purgeLock: Date.now() });
-      try {
-        const now = Date.now();
-        const sevenDaysAgo = now - (7 * 24 * 60 * 60 * 1000);
-        const sixtyMinutesMs = 60 * 60 * 1000;
-        
-        let purgedSnapshots = 0;
-        metrics = await loadMetrics();
-        
-        // Process each user
-        for (const [userKey, user] of Object.entries(metrics.users || {})){
-          // Skip excepted users
-          if (exceptedUsers.has(userKey)) continue;
-          
-          // Process each post
-          for (const [postId, post] of Object.entries(user.posts || {})){
-            if (!Array.isArray(post.snapshots) || post.snapshots.length === 0) continue;
-            
-            // Sort snapshots by timestamp
-            const sortedSnapshots = [...post.snapshots].sort((a, b) => (a.t || 0) - (b.t || 0));
-            const snapshotsToKeep = [];
-            let lastKeptTime = null;
-            
-            // Process snapshots from oldest to newest
-            for (let i = 0; i < sortedSnapshots.length; i++){
-              const snap = sortedSnapshots[i];
-              const snapTime = snap.t || 0;
-              
-              // Always keep snapshots newer than 7 days
-              if (snapTime >= sevenDaysAgo) {
-                snapshotsToKeep.push(snap);
-                lastKeptTime = snapTime;
-                continue;
-              }
-              
-              // For snapshots older than 7 days, keep only if it's been at least 60 minutes
-              // since the last kept snapshot (creates "every-60-minute view")
-              // This "combs out" detailed/frequent snapshots, keeping only spaced-out ones
-              if (lastKeptTime === null || (snapTime - lastKeptTime) >= sixtyMinutesMs) {
-                snapshotsToKeep.push(snap);
-                lastKeptTime = snapTime;
-              } else {
-                // This snapshot is within 60 minutes of another, delete it (detailed data)
-                purgedSnapshots++;
-              }
-            }
-            
-            // Update post with filtered snapshots
-            post.snapshots = snapshotsToKeep;
-          }
-        }
-        
-        // Save purged metrics
-        if (purgedSnapshots > 0) {
-          await chrome.storage.local.set({ metrics });
-          // Update last run time
-          await chrome.storage.local.set({ [COMB_MODE_LAST_RUN_KEY]: now });
-          console.log(`[Comb Mode] Purged ${purgedSnapshots} snapshot(s)`);
-          // Update storage size display if purge modal is open
-          if (purgeModal && purgeModal.style.display !== 'none') {
-            await updateStorageSizeDisplay();
-          }
-        }
-      } catch (e) {
-        console.error('[Comb Mode] Purge failed', e);
-      } finally {
-        await chrome.storage.local.remove('purgeLock');
-      }
-    }
-
-    function scheduleCombModeDaily(){
-      // Clear existing timer if any
-      if (combModeDailyTimer) {
-        clearTimeout(combModeDailyTimer);
-        combModeDailyTimer = null;
-      }
-      
-      if (!combModeEnabled) return;
-      
-      async function scheduleNextRun(){
-        try {
-          const now = Date.now();
-          const { [COMB_MODE_LAST_RUN_KEY]: lastRun } = await chrome.storage.local.get(COMB_MODE_LAST_RUN_KEY);
-          
-          // Calculate next run time (24 hours from last run, or immediately if never run)
-          const nextRunTime = lastRun ? lastRun + (24 * 60 * 60 * 1000) : now;
-          const delay = Math.max(0, nextRunTime - now);
-          
-          combModeDailyTimer = setTimeout(async () => {
-            await runCombModePurge();
-            // Schedule next run
-            scheduleNextRun();
-          }, delay);
-        } catch (e) {
-          console.error('[Comb Mode] Failed to schedule daily purge', e);
-        }
-      }
-      
-      scheduleNextRun();
     }
 
     function getPurgeDescription(){
@@ -4609,21 +4109,21 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         description = 'all data outside the last 1 year';
       }
       
-      // Add exceptions clause
-      if (exceptedUsers.size > 0) {
-        const exceptedHandles = Array.from(exceptedUsers).map(userKey => {
+      // Add exemptions clause
+      if (exemptedUsers.size > 0) {
+        const exemptedHandles = Array.from(exemptedUsers).map(userKey => {
           const user = metrics.users[userKey];
           return user?.handle || userKey;
         });
-        let exceptText = '';
-        if (exceptedHandles.length === 1) {
-          exceptText = `except for any data from ${exceptedHandles[0]}`;
-        } else if (exceptedHandles.length === 2) {
-          exceptText = `except for any data from ${exceptedHandles[0]} and ${exceptedHandles[1]}`;
+        let exemptText = '';
+        if (exemptedHandles.length === 1) {
+          exemptText = `except for any data from ${exemptedHandles[0]}`;
+        } else if (exemptedHandles.length === 2) {
+          exemptText = `except for any data from ${exemptedHandles[0]} and ${exemptedHandles[1]}`;
         } else {
-          exceptText = `except for any data from ${exceptedHandles.slice(0, -1).join(', ')}, and ${exceptedHandles[exceptedHandles.length - 1]}`;
+          exemptText = `except for any data from ${exemptedHandles.slice(0, -1).join(', ')}, and ${exemptedHandles[exemptedHandles.length - 1]}`;
         }
-        description += ' ' + exceptText;
+        description += ' ' + exemptText;
       }
       
       return description;
@@ -4681,25 +4181,14 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     postCountSlider.addEventListener('input', updateSliderValues);
     followerCountSlider.addEventListener('input', updateSliderValues);
 
-    // Comb Mode checkbox handler
-    const combModeCheckbox = $('#combModeCheckbox');
-    if (combModeCheckbox) {
-      combModeCheckbox.addEventListener('change', async (e) => {
-        combModeEnabled = e.target.checked;
-        await saveCombModePreference();
-        // Reschedule daily timer based on new preference
-        scheduleCombModeDaily();
-      });
-    }
-
-    // Exceptions functionality
-    function buildExceptionsDropdown(){
-      const sel = $('#exceptionsUserSelect');
+    // Exemptions functionality
+    function buildExemptionsDropdown(){
+      const sel = $('#exemptionsUserSelect');
       if (!sel) return;
-      sel.innerHTML = '<option value="">Select user to except…</option>';
+      sel.innerHTML = '<option value="">Select user to exempt…</option>';
       const entries = Object.entries(metrics.users);
       const users = entries
-        .filter(([key])=>!exceptedUsers.has(key))
+        .filter(([key])=>!exemptedUsers.has(key))
         .sort((a,b)=>{
           const aCount = Object.keys(a[1].posts||{}).length;
           const bCount = Object.keys(b[1].posts||{}).length;
@@ -4716,108 +4205,100 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         opt.textContent = `${u.handle || key} (${postCount})`;
         sel.appendChild(opt);
       });
-      sel.disabled = exceptedUsers.size >= MAX_EXCEPTED_USERS || users.length === 0;
+      sel.disabled = exemptedUsers.size >= MAX_EXEMPTED_USERS || users.length === 0;
     }
 
-    function renderExceptionPills(){
-      const container = $('#exceptionsPills');
+    function renderExemptionPills(){
+      const container = $('#exemptionsPills');
       if (!container) return;
       container.innerHTML = '';
-      const users = Array.from(exceptedUsers);
+      const users = Array.from(exemptedUsers);
       users.forEach((userKey)=>{
         const user = metrics.users[userKey];
         const handle = user?.handle || userKey;
         const pill = document.createElement('div');
-        pill.className = 'exception-pill';
+        pill.className = 'exemption-pill';
         pill.dataset.userKey = userKey;
         const nameSpan = document.createElement('span');
-        nameSpan.className = 'exception-pill-name';
+        nameSpan.className = 'exemption-pill-name';
         nameSpan.textContent = handle;
         const removeBtn = document.createElement('span');
-        removeBtn.className = 'exception-pill-remove';
+        removeBtn.className = 'exemption-pill-remove';
         removeBtn.textContent = '×';
         removeBtn.onclick = async (e)=>{
           e.stopPropagation();
-          exceptedUsers.delete(userKey);
-          await saveExceptedUsers();
-          renderExceptionPills();
-          buildExceptionsDropdown();
+          exemptedUsers.delete(userKey);
+          await saveExemptedUsers();
+          renderExemptionPills();
+          buildExemptionsDropdown();
           updatePurgeReview();
         };
         pill.appendChild(nameSpan);
         pill.appendChild(removeBtn);
         container.appendChild(pill);
       });
-      if (exceptedUsers.size < MAX_EXCEPTED_USERS){
+      if (exemptedUsers.size < MAX_EXEMPTED_USERS){
         const addBtn = document.createElement('button');
-        addBtn.className = 'exceptions-add-btn';
+        addBtn.className = 'exemptions-add-btn';
         addBtn.textContent = '+';
         addBtn.title = 'Add user';
         addBtn.onclick = ()=>{
-          $('#exceptionsSearch').focus();
+          $('#exemptionsSearch').focus();
         };
         container.appendChild(addBtn);
       }
-      const searchInput = $('#exceptionsSearch');
-      if (searchInput) searchInput.disabled = exceptedUsers.size >= MAX_EXCEPTED_USERS;
+      const searchInput = $('#exemptionsSearch');
+      if (searchInput) searchInput.disabled = exemptedUsers.size >= MAX_EXEMPTED_USERS;
     }
 
-    async function addExceptedUser(userKey){
-      if (exceptedUsers.size >= MAX_EXCEPTED_USERS) return;
+    async function addExemptedUser(userKey){
+      if (exemptedUsers.size >= MAX_EXEMPTED_USERS) return;
       if (!metrics.users[userKey]) return;
-      if (exceptedUsers.has(userKey)) return;
-      exceptedUsers.add(userKey);
-      await saveExceptedUsers();
-      renderExceptionPills();
-      buildExceptionsDropdown();
+      if (exemptedUsers.has(userKey)) return;
+      exemptedUsers.add(userKey);
+      await saveExemptedUsers();
+      renderExemptionPills();
+      buildExemptionsDropdown();
       updatePurgeReview();
-      $('#exceptionsSearch').value = '';
-      $('#exceptionsSuggestions').style.display = 'none';
+      $('#exemptionsSearch').value = '';
+      $('#exemptionsSuggestions').style.display = 'none';
     }
 
-    $('#exceptionsUserSelect').addEventListener('change', async (e)=>{
+    $('#exemptionsUserSelect').addEventListener('change', async (e)=>{
       const userKey = e.target.value;
-      if (userKey && !exceptedUsers.has(userKey)){
-        await addExceptedUser(userKey);
+      if (userKey && !exemptedUsers.has(userKey)){
+        await addExemptedUser(userKey);
         e.target.value = '';
       }
     });
 
-    $('#exceptionsSearch').addEventListener('input', (e)=>{
-      const suggestions = $('#exceptionsSuggestions');
+    $('#exemptionsSearch').addEventListener('input', (e)=>{
+      const suggestions = $('#exemptionsSuggestions');
       const list = filterUsersByQuery(metrics, e.target.value)
-        .filter(([key])=>!exceptedUsers.has(key))
+        .filter(([key])=>!exemptedUsers.has(key))
         .slice(0, 20);
       suggestions.innerHTML = list.map(([key,u])=>{
         const count = Object.keys(u.posts||{}).length;
         return `<div class="item" data-key="${key}"><span>${u.handle||key}</span><span style="color:#7d8a96">${count} posts</span></div>`;
       }).join('');
       suggestions.style.display = list.length ? 'block' : 'none';
-      $$('#exceptionsSuggestions .item').forEach(it=>{
+      $$('#exemptionsSuggestions .item').forEach(it=>{
         it.addEventListener('click', async ()=>{
-          await addExceptedUser(it.dataset.key);
+          await addExemptedUser(it.dataset.key);
         });
       });
     });
-    document.addEventListener('click', (e)=>{ if (!e.target.closest('.user-picker-exceptions')) $('#exceptionsSuggestions').style.display='none'; });
+    document.addEventListener('click', (e)=>{ if (!e.target.closest('.user-picker-exemptions')) $('#exemptionsSuggestions').style.display='none'; });
 
     $('#purgeMenu').addEventListener('click', async ()=>{
       purgeModal.style.display = 'block';
-      // Load saved exceptions
-      const saved = await loadExceptedUsers();
-      exceptedUsers.clear();
-      saved.forEach(key => exceptedUsers.add(key));
-      renderExceptionPills();
-      buildExceptionsDropdown();
+      // Load saved exemptions
+      const saved = await loadExemptedUsers();
+      exemptedUsers.clear();
+      saved.forEach(key => exemptedUsers.add(key));
+      renderExemptionPills();
+      buildExemptionsDropdown();
       updateSliderValues();
-      // Load comb mode preference
-      await loadCombModePreference();
-      const combModeCheckbox = $('#combModeCheckbox');
-      if (combModeCheckbox) {
-        combModeCheckbox.checked = combModeEnabled;
-      }
-      // Update storage size display
-      await updateStorageSizeDisplay();
     });
 
     $('#purgeExecute').addEventListener('click', ()=>{
@@ -4831,44 +4312,21 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     });
 
     $('#purgeConfirmYes').addEventListener('click', async ()=>{
-      // Set purge lock to prevent concurrent writes from content script
-      await chrome.storage.local.set({ purgeLock: Date.now() });
-
       const days = Number(dateRangeSlider.value);
       const minPosts = Number(postCountSlider.value);
       const minFollowers = Number(followerCountSlider.value);
       
       const cutoffTime = Date.now() - (days * 24 * 60 * 60 * 1000);
       
-      // Helper to get post time with snapshot fallback for purge
-      function getPostTimeForPurge(post) {
-        // First try explicit post time fields
-        let t = getPostTimeStrict(post);
-        if (t > 0) return t;
-        
-        // Fallback: use the earliest snapshot timestamp
-        if (Array.isArray(post.snapshots) && post.snapshots.length > 0) {
-          const times = post.snapshots.map(s => s.t || 0).filter(t => t > 0);
-          if (times.length > 0) {
-            return Math.min(...times); // Return earliest snapshot time
-          }
-        }
-        
-        // No timestamp available
-        return 0;
-      }
-      
       try {
         metrics = await loadMetrics();
         let purgedUsers = 0;
         let purgedPosts = 0;
         
-        console.log('[Purge] Starting purge with cutoff:', new Date(cutoffTime).toISOString(), 'excepted users:', Array.from(exceptedUsers));
-        
         // Process each user
         for (const [userKey, user] of Object.entries(metrics.users || {})){
-          // Skip excepted users
-          if (exceptedUsers.has(userKey)) continue;
+          // Skip exempted users
+          if (exemptedUsers.has(userKey)) continue;
           
           // Ensure posts object exists
           if (!user.posts) user.posts = {};
@@ -4880,11 +4338,10 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           // ALWAYS purge posts by date first (if days is set and <= 365)
           // This ensures all old posts are removed regardless of minPosts/minFollowers settings
           let postsToKeep = {};
-          const originalPostCount = Object.keys(user.posts || {}).length;
           if (days <= 365) {
             // Purge posts older than cutoff time
             for (const [pid, post] of Object.entries(user.posts || {})){
-              const postTime = getPostTimeForPurge(post);
+              const postTime = getPostTimeStrict(post);
               // Keep posts that have a timestamp AND are within the cutoff time
               // Posts without timestamps are purged (considered old/unknown)
               if (postTime > 0 && postTime >= cutoffTime){
@@ -4892,10 +4349,6 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
               } else {
                 purgedPosts++;
               }
-            }
-            const purgedCount = originalPostCount - Object.keys(postsToKeep).length;
-            if (purgedCount > 0) {
-              console.log(`[Purge] User ${user.handle || userKey}: removed ${purgedCount}/${originalPostCount} posts`);
             }
           } else {
             // If days > 365, keep all posts (no date-based purging)
@@ -4939,8 +4392,6 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           }
         }
         
-        console.log('[Purge] Complete. Total removed:', purgedUsers, 'users,', purgedPosts, 'posts');
-        
         // Save purged metrics
         await chrome.storage.local.set({ metrics });
         
@@ -4964,69 +4415,13 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         purgeModal.style.display = 'none';
         purgeConfirmDialog.style.display = 'none';
         
-        // Update storage size display
-        await updateStorageSizeDisplay();
-        
         // Show success message
         alert(`Purge complete!\n\nRemoved ${purgedUsers} user(s) and ${purgedPosts} post(s).`);
       } catch (e) {
         console.error('[Dashboard] Purge failed', e);
         alert('Purge failed. Please check the console for details.');
-      } finally {
-        await chrome.storage.local.remove('purgeLock');
       }
     });
-
-    // Per-post purge confirmation handlers
-    if (postPurgeConfirmNo) {
-      postPurgeConfirmNo.addEventListener('click', ()=>{
-        pendingPostPurge = null;
-        if (postPurgeConfirmDialog) postPurgeConfirmDialog.style.display = 'none';
-      });
-    }
-
-    if (postPurgeConfirmYes) {
-      postPurgeConfirmYes.addEventListener('click', async ()=>{
-        if (!pendingPostPurge){
-          if (postPurgeConfirmDialog) postPurgeConfirmDialog.style.display = 'none';
-          return;
-        }
-        const { pid, userKey } = pendingPostPurge;
-        pendingPostPurge = null;
-        try {
-          metrics = await loadMetrics();
-          const user = metrics?.users?.[userKey];
-          if (user?.posts && user.posts[pid]){
-            delete user.posts[pid];
-            if (Object.keys(user.posts).length === 0){
-              delete metrics.users[userKey];
-            }
-            await chrome.storage.local.set({ metrics });
-            // Update UI state for current user
-            if (userKey === currentUserKey){
-              visibleSet.delete(pid);
-              const prev = currentUserKey;
-              const def = buildUserOptions(metrics);
-              if (!metrics.users[prev]) currentUserKey = def;
-              $('#userSelect').value = currentUserKey || '';
-              for (const key of Array.from(compareUsers)){
-                if (!metrics.users[key]) compareUsers.delete(key);
-              }
-              renderComparePills();
-              buildCompareDropdown();
-              refreshUserUI({ preserveEmpty: true });
-              persistVisibility();
-              updateBestTimeToPostSection();
-            }
-          }
-        } catch (e) {
-          console.error('[Dashboard] Post purge failed', e);
-          alert('Failed to purge this post. Please try again.');
-        } finally {
-          if (postPurgeConfirmDialog) postPurgeConfirmDialog.style.display = 'none';
-        }
-      });
-    }
 
     $('#refresh').addEventListener('click', async ()=>{
       // capture zoom states
@@ -5076,17 +4471,10 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       }
     });
     
-    // Initialize Comb Mode
-    (async () => {
-      await loadCombModePreference();
-      scheduleCombModeDaily();
-    })();
-    
     // Persist zoom on full page reload/navigation
     function persistZoom(){
       const z = zoomStates[currentUserKey] || (zoomStates[currentUserKey] = {});
       z.scatter = chart.getZoom();
-      z.viewsPerPerson = viewsPerPersonChart.getZoom();
       z.views = viewsChart.getZoom();
       z.first24Hours = first24HoursChart.getZoom();
       z.likesAll = allLikesChart.getZoom();
@@ -5096,7 +4484,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       try { chrome.storage.local.set({ zoomStates }); } catch {}
     }
     window.addEventListener('beforeunload', persistZoom);
-      $('#resetZoom').addEventListener('click', ()=>{ chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ skipRestoreZoom: true }); });
+      $('#resetZoom').addEventListener('click', ()=>{ chart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ skipRestoreZoom: true }); });
       $('#showAll').addEventListener('click', ()=>{ const u = metrics.users[currentUserKey]; if (!u) return; visibleSet.clear(); Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid)); chart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ skipRestoreZoom: true }); persistVisibility(); });
       $('#hideAll').addEventListener('click', ()=>{ visibleSet.clear(); chart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ preserveEmpty: true, skipRestoreZoom: true }); persistVisibility(); });
       // First 24 hours slider
@@ -5117,16 +4505,6 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         });
         sliderValue.textContent = fmtSliderTime(parseInt(slider.value) || 1440);
       }
-      const viewsPerPersonSlider = $('#viewsPerPersonSlider');
-      const viewsPerPersonSliderValue = $('#viewsPerPersonSliderValue');
-      if (viewsPerPersonSlider && viewsPerPersonSliderValue) {
-        viewsPerPersonSlider.addEventListener('input', (e)=>{
-          const minutes = parseInt(e.target.value);
-          viewsPerPersonSliderValue.textContent = fmtSliderTime(minutes);
-          updateViewsPerPersonChart(minutes);
-        });
-        viewsPerPersonSliderValue.textContent = fmtSliderTime(parseInt(viewsPerPersonSlider.value) || 1440);
-      }
       $('#last5').addEventListener('click', ()=>{
         const u = metrics.users[currentUserKey];
         if (!u) return;
@@ -5143,7 +4521,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         const sorted = withTs.concat(noTs);
         visibleSet.clear();
         sorted.slice(0, 5).forEach(it=>visibleSet.add(it.pid));
-        chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
+        chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
         refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
       });
       $('#last10').addEventListener('click', ()=>{
@@ -5162,7 +4540,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         const sorted = withTs.concat(noTs);
         visibleSet.clear();
         sorted.slice(0, 10).forEach(it=>visibleSet.add(it.pid));
-        chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
+        chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
         refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
       });
       $('#top5').addEventListener('click', ()=>{
@@ -5178,7 +4556,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         const sorted = mapped.sort((a,b)=>b.views - a.views);
         visibleSet.clear();
         sorted.slice(0, 5).forEach(it=>visibleSet.add(it.pid));
-        chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
+        chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
         refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
       });
       $('#top10').addEventListener('click', ()=>{
@@ -5194,7 +4572,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         const sorted = mapped.sort((a,b)=>b.views - a.views);
         visibleSet.clear();
         sorted.slice(0, 10).forEach(it=>visibleSet.add(it.pid));
-        chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
+        chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
         refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
       });
       $('#bottom5').addEventListener('click', ()=>{
@@ -5217,7 +4595,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         const sorted = olderThan24h.sort((a,b)=>a.views - b.views);
         visibleSet.clear();
         sorted.slice(0, 5).forEach(it=>visibleSet.add(it.pid));
-        chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
+        chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
         refreshUserUI(); persistVisibility();
       });
       $('#bottom10').addEventListener('click', ()=>{
@@ -5240,7 +4618,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         const sorted = olderThan24h.sort((a,b)=>a.views - b.views);
         visibleSet.clear();
         sorted.slice(0, 10).forEach(it=>visibleSet.add(it.pid));
-        chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
+        chart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
         refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
       });
 

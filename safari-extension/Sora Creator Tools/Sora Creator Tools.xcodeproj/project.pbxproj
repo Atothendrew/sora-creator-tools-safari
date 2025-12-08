@@ -13,8 +13,8 @@
 		494C26042EE1F9ED007E32F9 /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 494C26022EE1F9ED007E32F9 /* Main.storyboard */; };
 		494C260D2EE1F9ED007E32F9 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 494C260C2EE1F9ED007E32F9 /* AppDelegate.swift */; };
 		494C26102EE1F9ED007E32F9 /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 494C260E2EE1F9ED007E32F9 /* Main.storyboard */; };
-		494C26172EE1F9ED007E32F9 /* Sora Creator Tools Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 494C26162EE1F9ED007E32F9 /* Sora Creator Tools Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		494C26212EE1F9ED007E32F9 /* Sora Creator Tools Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 494C26202EE1F9ED007E32F9 /* Sora Creator Tools Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		494C26172EE1F9ED007E32F9 /* Creator Tools for Sora Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 494C26162EE1F9ED007E32F9 /* Creator Tools for Sora Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		494C26212EE1F9ED007E32F9 /* Creator Tools for Sora Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 494C26202EE1F9ED007E32F9 /* Creator Tools for Sora Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		494C26262EE1F9ED007E32F9 /* Main.html in Resources */ = {isa = PBXBuildFile; fileRef = 494C25EB2EE1F9EC007E32F9 /* Main.html */; };
 		494C26272EE1F9ED007E32F9 /* Main.html in Resources */ = {isa = PBXBuildFile; fileRef = 494C25EB2EE1F9EC007E32F9 /* Main.html */; };
 		494C26282EE1F9ED007E32F9 /* Icon.png in Resources */ = {isa = PBXBuildFile; fileRef = 494C25ED2EE1F9EC007E32F9 /* Icon.png */; };
@@ -83,7 +83,7 @@
 			dstPath = "";
 			dstSubfolderSpec = 13;
 			files = (
-				494C26172EE1F9ED007E32F9 /* Sora Creator Tools Extension.appex in Embed Foundation Extensions */,
+				494C26172EE1F9ED007E32F9 /* Creator Tools for Sora Extension.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -94,7 +94,7 @@
 			dstPath = "";
 			dstSubfolderSpec = 13;
 			files = (
-				494C26212EE1F9ED007E32F9 /* Sora Creator Tools Extension.appex in Embed Foundation Extensions */,
+				494C26212EE1F9ED007E32F9 /* Creator Tools for Sora Extension.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -109,19 +109,19 @@
 		494C25F02EE1F9EC007E32F9 /* ViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewController.swift; sourceTree = "<group>"; };
 		494C25F12EE1F9ED007E32F9 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		494C25F32EE1F9ED007E32F9 /* SafariWebExtensionHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafariWebExtensionHandler.swift; sourceTree = "<group>"; };
-		494C25F82EE1F9ED007E32F9 /* Sora Creator Tools.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Sora Creator Tools.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		494C25F82EE1F9ED007E32F9 /* Creator Tools for Sora.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Creator Tools for Sora.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		494C25FB2EE1F9ED007E32F9 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		494C25FD2EE1F9ED007E32F9 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
 		494C26002EE1F9ED007E32F9 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		494C26032EE1F9ED007E32F9 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/Main.storyboard; sourceTree = "<group>"; };
 		494C26052EE1F9ED007E32F9 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		494C260A2EE1F9ED007E32F9 /* Sora Creator Tools.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Sora Creator Tools.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		494C260A2EE1F9ED007E32F9 /* Creator Tools for Sora.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Creator Tools for Sora.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		494C260C2EE1F9ED007E32F9 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		494C260F2EE1F9ED007E32F9 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/Main.storyboard; sourceTree = "<group>"; };
 		494C26112EE1F9ED007E32F9 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		494C26162EE1F9ED007E32F9 /* Sora Creator Tools Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Sora Creator Tools Extension.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
+		494C26162EE1F9ED007E32F9 /* Creator Tools for Sora Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Creator Tools for Sora Extension.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
 		494C261B2EE1F9ED007E32F9 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		494C26202EE1F9ED007E32F9 /* Sora Creator Tools Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Sora Creator Tools Extension.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
+		494C26202EE1F9ED007E32F9 /* Creator Tools for Sora Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Creator Tools for Sora Extension.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
 		494C26252EE1F9ED007E32F9 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		494C26452EE1F9EE007E32F9 /* imagery */ = {isa = PBXFileReference; lastKnownFileType = folder; name = imagery; path = ../../../imagery; sourceTree = "<group>"; };
 		494C26462EE1F9EE007E32F9 /* LICENSE */ = {isa = PBXFileReference; lastKnownFileType = text; name = LICENSE; path = ../../../LICENSE; sourceTree = "<group>"; };
@@ -217,10 +217,10 @@
 		494C25F92EE1F9ED007E32F9 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				494C25F82EE1F9ED007E32F9 /* Sora Creator Tools.app */,
-				494C260A2EE1F9ED007E32F9 /* Sora Creator Tools.app */,
-				494C26162EE1F9ED007E32F9 /* Sora Creator Tools Extension.appex */,
-				494C26202EE1F9ED007E32F9 /* Sora Creator Tools Extension.appex */,
+				494C25F82EE1F9ED007E32F9 /* Creator Tools for Sora.app */,
+				494C260A2EE1F9ED007E32F9 /* Creator Tools for Sora.app */,
+				494C26162EE1F9ED007E32F9 /* Creator Tools for Sora Extension.appex */,
+				494C26202EE1F9ED007E32F9 /* Creator Tools for Sora Extension.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -306,7 +306,7 @@
 			packageProductDependencies = (
 			);
 			productName = "Sora Creator Tools (iOS)";
-			productReference = 494C25F82EE1F9ED007E32F9 /* Sora Creator Tools.app */;
+			productReference = 494C25F82EE1F9ED007E32F9 /* Creator Tools for Sora.app */;
 			productType = "com.apple.product-type.application";
 		};
 		494C26092EE1F9ED007E32F9 /* Sora Creator Tools (macOS) */ = {
@@ -327,7 +327,7 @@
 			packageProductDependencies = (
 			);
 			productName = "Sora Creator Tools (macOS)";
-			productReference = 494C260A2EE1F9ED007E32F9 /* Sora Creator Tools.app */;
+			productReference = 494C260A2EE1F9ED007E32F9 /* Creator Tools for Sora.app */;
 			productType = "com.apple.product-type.application";
 		};
 		494C26152EE1F9ED007E32F9 /* Sora Creator Tools Extension (iOS) */ = {
@@ -346,7 +346,7 @@
 			packageProductDependencies = (
 			);
 			productName = "Sora Creator Tools Extension (iOS)";
-			productReference = 494C26162EE1F9ED007E32F9 /* Sora Creator Tools Extension.appex */;
+			productReference = 494C26162EE1F9ED007E32F9 /* Creator Tools for Sora Extension.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
 		494C261F2EE1F9ED007E32F9 /* Sora Creator Tools Extension (macOS) */ = {
@@ -365,7 +365,7 @@
 			packageProductDependencies = (
 			);
 			productName = "Sora Creator Tools Extension (macOS)";
-			productReference = 494C26202EE1F9ED007E32F9 /* Sora Creator Tools Extension.appex */;
+			productReference = 494C26202EE1F9ED007E32F9 /* Creator Tools for Sora Extension.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
@@ -695,7 +695,7 @@
 				DEVELOPMENT_TEAM = M5M8HHWE22;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "iOS (Extension)/Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = "Sora Creator Tools Extension";
+				INFOPLIST_KEY_CFBundleDisplayName = "Creator Tools for Sora Extension";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -709,7 +709,7 @@
 					SafariServices,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.andrewwilliamson.soracreatortools.extension;
-				PRODUCT_NAME = "Sora Creator Tools Extension";
+				PRODUCT_NAME = "Creator Tools for Sora Extension";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -729,7 +729,7 @@
 				DEVELOPMENT_TEAM = M5M8HHWE22;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "iOS (Extension)/Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = "Sora Creator Tools Extension";
+				INFOPLIST_KEY_CFBundleDisplayName = "Creator Tools for Sora Extension";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -743,7 +743,7 @@
 					SafariServices,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.andrewwilliamson.soracreatortools.extension;
-				PRODUCT_NAME = "Sora Creator Tools Extension";
+				PRODUCT_NAME = "Creator Tools for Sora Extension";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -766,7 +766,7 @@
 				DEVELOPMENT_TEAM = M5M8HHWE22;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "iOS (App)/Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = "Sora Creator Tools";
+				INFOPLIST_KEY_CFBundleDisplayName = "Creator Tools for Sora";
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				INFOPLIST_KEY_UIMainStoryboardFile = Main;
@@ -785,7 +785,7 @@
 					WebKit,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.andrewwilliamson.soracreatortools;
-				PRODUCT_NAME = "Sora Creator Tools";
+				PRODUCT_NAME = "Creator Tools for Sora";
 				SDKROOT = iphoneos;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -807,7 +807,7 @@
 				DEVELOPMENT_TEAM = M5M8HHWE22;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "iOS (App)/Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = "Sora Creator Tools";
+				INFOPLIST_KEY_CFBundleDisplayName = "Creator Tools for Sora";
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				INFOPLIST_KEY_UIMainStoryboardFile = Main;
@@ -826,7 +826,7 @@
 					WebKit,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.andrewwilliamson.soracreatortools;
-				PRODUCT_NAME = "Sora Creator Tools";
+				PRODUCT_NAME = "Creator Tools for Sora";
 				SDKROOT = iphoneos;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -851,7 +851,7 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "macOS (Extension)/Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = "Sora Creator Tools Extension";
+				INFOPLIST_KEY_CFBundleDisplayName = "Creator Tools for Sora Extension";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -865,7 +865,7 @@
 					SafariServices,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.andrewwilliamson.soracreatortools.extension;
-				PRODUCT_NAME = "Sora Creator Tools Extension";
+				PRODUCT_NAME = "Creator Tools for Sora Extension";
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -888,7 +888,7 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "macOS (Extension)/Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = "Sora Creator Tools Extension";
+				INFOPLIST_KEY_CFBundleDisplayName = "Creator Tools for Sora Extension";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -902,7 +902,7 @@
 					SafariServices,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.andrewwilliamson.soracreatortools.extension;
-				PRODUCT_NAME = "Sora Creator Tools Extension";
+				PRODUCT_NAME = "Creator Tools for Sora Extension";
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -928,7 +928,7 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "macOS (App)/Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = "Sora Creator Tools";
+				INFOPLIST_KEY_CFBundleDisplayName = "Creator Tools for Sora";
 				INFOPLIST_KEY_NSMainStoryboardFile = Main;
 				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -944,7 +944,7 @@
 					WebKit,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.andrewwilliamson.soracreatortools;
-				PRODUCT_NAME = "Sora Creator Tools";
+				PRODUCT_NAME = "Creator Tools for Sora";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = macosx;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -971,7 +971,7 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "macOS (App)/Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = "Sora Creator Tools";
+				INFOPLIST_KEY_CFBundleDisplayName = "Creator Tools for Sora";
 				INFOPLIST_KEY_NSMainStoryboardFile = Main;
 				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -987,7 +987,7 @@
 					WebKit,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.andrewwilliamson.soracreatortools;
-				PRODUCT_NAME = "Sora Creator Tools";
+				PRODUCT_NAME = "Creator Tools for Sora";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = macosx;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;

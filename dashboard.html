@@ -3,12 +3,12 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Sora Metrics Dashboard</title>
+  <title>Creator Tools for Sora Dashboard</title>
   <link rel="stylesheet" href="dashboard.css" />
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">Sora Creator Tools – Dashboard Mode</div>
+    <div class="brand">Creator Tools for Sora – Dashboard Mode</div>
     <div class="actions">
       <button id="resetZoom" title="Reset zoom to fit">Reset Zoom</button>
       <button id="refresh">Refresh Data</button>
@@ -31,6 +31,27 @@
         <button id="top10" title="Show top 10 posts by views">Top 10</button>
         <button id="bottom5" title="Show 5 least viewed posts (excluding last 24 hours)">Bottom 5</button>
         <button id="bottom10" title="Show 10 least viewed posts (excluding last 24 hours)">Bottom 10</button>
+      </div>
+      <div class="date-filter">
+        <label for="dateFilterPreset">Post Filter</label>
+        <div class="date-filter-row">
+          <select id="dateFilterPreset" title="Choose a date range">
+            <option value="all">All time</option>
+            <option value="today">Today</option>
+            <option value="yesterday">Yesterday</option>
+            <option value="rolling-3">Last 3 days</option>
+            <option value="rolling-7">Last 7 days</option>
+            <option value="rolling-30">Last 30 days</option>
+            <option value="custom">Custom...</option>
+          </select>
+          <div class="date-filter-custom" id="dateFilterCustom">
+            <span>Last</span>
+            <input type="number" id="dateFilterDays" min="1" max="365" value="7" />
+            <span>days</span>
+            <button id="dateFilterApply">Apply</button>
+          </div>
+        </div>
+        <div class="date-filter-summary" id="dateFilterSummary">Showing all posts</div>
       </div>
       <div id="posts" class="posts"></div>
     </aside>

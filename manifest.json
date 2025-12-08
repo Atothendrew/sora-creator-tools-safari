@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Sora Creator Tools",
-  "version": "1.1.1",
-  "description": "Overlay unique views, gather data, and explore Sora dashboards with local analytics.",
+  "name": "Creator Tools for Sora",
+  "version": "1.1.2",
+  "description": "Creator Tools for Sora overlays unique views, gathers data, and keeps analytics local.",
   "icons": {
     "16": "icons/16.png",
     "48": "icons/48.png",
