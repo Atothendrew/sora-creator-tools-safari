@@ -19,6 +19,7 @@
 - `manifest.json`, `background.js`, `content.js`, `inject.js`, `dashboard.*` implement the Chrome/Safari web extension that instruments `https://sora.chatgpt.com`.
 - `content.js` injects `api.js` first (request/body rewrite + duration dropdown/remix helpers) and then `inject.js`; `inject.js` is intentionally skipped on draft detail routes (`/d/...`) while `api.js` still runs. Metrics persist via `chrome.storage.local`.
 - `dashboard.js/html/css` render the standalone analytics dashboard that opens via the browser action.
+- Dashboard sidebar includes a caption search box (stored under `dashboardCaptionFilter`) that filters the posts list by caption text without altering visibility sets.
 - Public-facing branding is "Creator Tools for Sora." The repo directory and Xcode project names still contain the legacy "Sora Creator Tools" label, but all manifest strings, CFBundle display names, and in-app copy now use the new name.
 - `inject.js` is very large (~4K LOC) and hooks `fetch`/XHR to collect stats, power Gather/Analyze modes, and render badges in-page. Gather controls expose toggles for auto refresh and "Unload off-screen videos"; the latter uses an `IntersectionObserver` to remove `<video>` sources once cards leave the viewport, dramatically lowering memory use during long gather runs.
 - Dashboard exports prefer `navigator.share` with a CSV `File` (so iPad/iOS Safari/extension pages can surface the system share sheet without download errors) and fall back to Blob downloads elsewhere.

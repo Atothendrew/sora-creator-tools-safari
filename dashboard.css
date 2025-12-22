@@ -79,6 +79,30 @@ input[type=search]:focus, select:focus{border-color:rgba(255,255,255,0.20);outli
   font-size:12px;
   color:var(--muted);
 }
+.caption-filter{
+  margin:0 6px 14px;
+  padding:10px;
+  border:1px solid var(--border);
+  border-radius:12px;
+  background:var(--chip);
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+}
+.caption-filter label{
+  font-size:12px;
+  font-weight:600;
+  color:var(--muted);
+  text-transform:uppercase;
+  letter-spacing:0.04em;
+}
+.caption-filter input[type=search]{
+  width:100%;
+}
+.caption-filter-summary{
+  font-size:12px;
+  color:var(--muted);
+}
 .posts{display:flex;flex-direction:column;gap:6px}
 .posts-empty{
   padding:14px;

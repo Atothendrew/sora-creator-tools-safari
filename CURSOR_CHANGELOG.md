@@ -4,6 +4,7 @@
 - Merged upstream `origin/main` into `ios`, pulling in the new `api.js` request/response hook and keeping `content.js`’s Safari `browser` → `chrome` shim while ensuring `inject.js` only runs outside draft detail pages.
 - Resolved CSS merge conflicts by combining the dashboard date-filter styling with upstream `.list-actions` active button/separator rules; retained prior dashboard styling.
 - Restored pre-merge local edits (dashboard/inject/notes) on top of the merged state. Merge remains uncommitted per repo policy.
+- Added a caption search box in the dashboard sidebar that filters the posts list by caption text (case-insensitive) and persists the query via `dashboardCaptionFilter`.
 
 # CURSOR_CHANGELOG
 
