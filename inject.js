@@ -26,11 +26,10 @@
   'use strict';
 
   try {
-    console.log('[SoraUV] inject.js loaded');
   } catch {}
 
   // Debug toggles
-  const DEBUG = { feed: true, thumbs: true, analyze: true, drafts: false };
+  const DEBUG = { feed: false, thumbs: false, analyze: false, drafts: false };
   const dlog = (topic, ...args) => {
     try {
       if (DEBUG[topic]) console.log('[SoraUV]', topic, ...args);
@@ -48,15 +47,16 @@
   const DRAFTS_RE = /\/(backend\/project_[a-z]+\/)?profile\/drafts($|\/|\?)/i;
   const CHARACTERS_RE = /\/(backend\/project_[a-z]+\/)?profile\/[^/]+\/characters($|\?)/i;
   const NF_CREATE_RE = /\/backend\/nf\/create/i;
-  const POST_DETAIL_RE = /\/(backend\/project_[a-z]+\/)?posts?\/[^/]+(\/(tree|children|ancestors))?(\?|$)/i;
+  const NF_PENDING_V2_RE = /\/backend\/nf\/pending\/v2/i;
+  const POST_DETAIL_RE = /\/(backend\/project_[a-z]+\/)?posts?\/[^/]+(\/(tree|children|ancestors|remix_posts|remixes))?(\?|$)/i;
 
-  // Includes <21h (1260 minutes)
-  const FILTER_STEPS_MIN = [null, 180, 360, 720, 900, 1080, 1260];
-  const FILTER_LABELS = ['Filter', '<3 hours', '<6 hours', '<12 hours', '<15 hours', '<18 hours', '<21 hours'];
+  // Includes <21h (1260 minutes) plus a final special filter
+  const FILTER_STEPS_MIN = [null, 180, 360, 720, 900, 1080, 1260, 'no_remixes'];
+  const FILTER_LABELS = ['Filter', '<3 hours', '<6 hours', '<12 hours', '<15 hours', '<18 hours', '<21 hours', 'No Remixes'];
   const ALLOWED_VIDEO_EXTENSIONS = ['mp4', 'mov', 'webm']; // Sora-supported video formats
 
   // Debug toggle for characters
-  DEBUG.characters = true;
+  DEBUG.characters = false;
 
   // == State Maps ==
   const idToUnique = new Map();
@@ -74,6 +74,7 @@
   const idToRemixTarget = new Map(); // Draft remix target post ID (if it's a remix of a post)
   const idToRemixTargetDraft = new Map(); // Draft remix target draft ID (if it's a remix of a draft)
   const taskToSourceDraft = new Map(); // task_id -> source draft gen ID (for draft remix tracking)
+  const taskToPrompt = new Map(); // task_id -> prompt (from pending v2)
   const charToCameoCount = new Map(); // Character cameo count
   const charToLikesCount = new Map(); // Character likes received count
   const charToCanCameo = new Map(); // Character can_cameo permission
@@ -81,6 +82,8 @@
   const usernameToUserId = new Map(); // Map username to user_id for character lookup
   const lockedPostIds = new Set(); // Post IDs whose data should not be overwritten (currently viewed posts)
   const processedPostDetailIds = new Set(); // Post detail responses already applied (avoid late duplicate overwrites)
+  const pendingPostDetailIds = new Set(); // Post IDs currently being detail-fetched
+  let lastPostDetailUrlTemplate = null; // Remember a detail URL pattern to reuse across posts
   const charToOriginalIndex = new Map(); // Store original order from API
   let charGlobalIndexCounter = 0; // Global counter for character order across all API calls
 
@@ -97,6 +100,7 @@
   let detailBadgeRetryInterval = null;
   let characterSortBtn = null;
   let characterSortMode = 'date'; // 'date', 'likes', 'cameos', 'likesPerDay'
+  let charAutoLoadLastAttemptMs = 0;
   let suppressDetailBadgeRender = false; // Flag to prevent renderDetailBadge during bulk processing
 
   let gatherScrollIntervalId = null;
@@ -134,6 +138,13 @@
   let bookmarksFilterState = 0;
   let bookmarksBtn = null;
 
+  // Dashboard injection perf guards
+  let dashboardBtnEl = null;
+  let dashboardInjectRafId = null;
+  let dashboardInjectRetryId = null;
+  let dashboardInjectLastAttemptMs = 0;
+  const DASHBOARD_INJECT_THROTTLE_MS = 1500;
+
   // Performance: Cache draft cards to avoid constant DOM queries
   let cachedDraftCards = null;
   let cachedDraftCardsCount = 0;
@@ -165,6 +176,9 @@
     return s.length > max ? s.slice(0, max).trim() + '…' : s;
   }
 
+  const ESC_MAP = { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' };
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ESC_MAP[c] || c);
+
   function fmtAgeMin(ageMin) {
     if (!Number.isFinite(ageMin)) return '∞';
     const mTotal = Math.max(0, Math.floor(ageMin));
@@ -185,6 +199,13 @@
     if (h) parts.push(`${h}h`);
     parts.push(`${m}m`);
     return parts.join(' ');
+  }
+
+  function fmtAgeMinPill(ageMin) {
+    if (!Number.isFinite(ageMin)) return fmtAgeMin(ageMin);
+    const mTotal = Math.max(0, Math.floor(ageMin));
+    if (mTotal <= 1) return 'Just now';
+    return fmtAgeMin(ageMin);
   }
 
   function fmtRefreshCountdown(ms) {
@@ -232,6 +253,7 @@
   const isExplore = () => location.pathname.startsWith('/explore');
   const isProfile = () => location.pathname.startsWith('/profile');
   const isPost = () => /^\/p\/s_[A-Za-z0-9]+/i.test(location.pathname);
+  const isDraftDetail = () => location.pathname === '/d' || location.pathname.startsWith('/d/');
 
   const isTopFeed = () => {
     try {
@@ -449,8 +471,55 @@
   const getItemId = (item) => {
     const cand = item?.post?.id || item?.post?.core_id || item?.post?.content_id || item?.id;
     if (cand && /^s_[A-Za-z0-9]+$/i.test(cand)) return normalizeId(cand);
+
+    // Guard against comment/reply objects: they often carry a parent/root post id
+    // (s_...) plus text, but are not posts themselves. Deep search would otherwise
+    // pick up the parent id and we'd treat the comment like a post.
+    try {
+      const p = item?.post ?? item ?? {};
+      const ownId = p?.id || item?.id || null;
+      const refId =
+        p?.post_id ||
+        p?.parent_post_id ||
+        p?.root_post_id ||
+        item?.post_id ||
+        item?.parent_post_id ||
+        item?.root_post_id ||
+        null;
+      const hasOwnSId = typeof ownId === 'string' && /^s_[A-Za-z0-9]+$/i.test(ownId);
+      const hasRefSId = typeof refId === 'string' && /^s_[A-Za-z0-9]+$/i.test(refId);
+      const hasMediaOrMetrics =
+        (Array.isArray(p?.attachments) && p.attachments.length > 0) ||
+        typeof p?.preview_image_url === 'string' ||
+        p?.unique_view_count != null ||
+        p?.view_count != null ||
+        p?.like_count != null;
+      if (!hasOwnSId && hasRefSId && !hasMediaOrMetrics) return null;
+    } catch {}
+
     const deep = findSIdDeep(item);
-    return deep ? normalizeId(deep) : null;
+    if (!deep) return null;
+    try {
+      const p = item?.post ?? item ?? {};
+      const ownId = p?.id || item?.id || null;
+      const hasOwnSId = typeof ownId === 'string' && /^s_[A-Za-z0-9]+$/i.test(ownId);
+      if (!hasOwnSId) {
+        const refs = [
+          p?.post_id,
+          p?.parent_post_id,
+          p?.root_post_id,
+          p?.source_post_id,
+          p?.remix_target_post_id,
+          item?.post_id,
+          item?.parent_post_id,
+          item?.root_post_id,
+          item?.source_post_id,
+          item?.remix_target_post_id,
+        ];
+        if (refs.some((r) => typeof r === 'string' && r === deep)) return null;
+      }
+    } catch {}
+    return normalizeId(deep);
   };
   function findSIdDeep(obj) {
     try {
@@ -471,8 +540,49 @@
     const m = link.getAttribute('href').match(/\/p\/(s_[A-Za-z0-9]+)/i);
     return m ? normalizeId(m[1]) : null;
   };
+  function isBadCardContainer(el) {
+    try {
+      if (!el || el === document.body || el === document.documentElement) return true;
+      const style = getComputedStyle(el);
+      if (style.position === 'fixed' || style.position === 'sticky') return true;
+      // Avoid nav/sidebars/toolbars that sometimes contain post links.
+      const role = el.getAttribute?.('role');
+      if (role === 'navigation' || role === 'menubar' || role === 'toolbar') return true;
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  function closestPostCardFromAnchor(a) {
+    if (!a) return null;
+    let el = a;
+    let steps = 0;
+    while (el && steps < 10) {
+      if (el.tagName === 'ARTICLE' || el.getAttribute?.('role') === 'article') {
+        if (!isBadCardContainer(el)) return el;
+      }
+      const cls = typeof el.className === 'string' ? el.className : '';
+      const hasMedia = !!el.querySelector?.('video, img, canvas');
+      const looksCardy =
+        hasMedia &&
+        (cls.includes('rounded') || cls.includes('overflow-hidden') || cls.includes('shadow') || cls.includes('group'));
+      if (looksCardy && !isBadCardContainer(el)) return el;
+      el = el.parentElement;
+      steps++;
+    }
+    return null;
+  }
+
   const selectAllCards = () =>
-    Array.from(document.querySelectorAll('a[href^="/p/s_"]')).map((a) => a.closest('article,div,section') || a);
+    Array.from(document.querySelectorAll('a[href^="/p/s_"]'))
+      .filter((a) => {
+        // Exclude posts inside Leaderboard dialog/popover
+        const inDialog = a.closest('[role="dialog"]');
+        return !inDialog;
+      })
+      .map((a) => closestPostCardFromAnchor(a) || a.closest('article,section,div') || a)
+      .filter((el) => !isBadCardContainer(el));
 
   // == Drafts helpers ==
   const extractDraftIdFromCard = (el) => {
@@ -533,6 +643,36 @@
     cachedDraftCardsCount = filtered.length;
     return filtered;
   };
+
+  function bestDraftDownloadUrl(item) {
+    if (!item || typeof item !== 'object') return null;
+    const source = item?.encodings?.source?.path;
+    const sourceWm = item?.encodings?.source_wm?.path;
+    const legacyDownloadUrl = item?.downloadable_url;
+    const legacyNoWm = item?.download_urls?.no_watermark;
+    const legacyWm = item?.download_urls?.watermark;
+    return [source, sourceWm, legacyDownloadUrl, legacyNoWm, legacyWm].find((u) => typeof u === 'string' && u);
+  }
+
+  function applyBestDownloadUrlToItem(item) {
+    const downloadUrl = bestDraftDownloadUrl(item);
+    if (!downloadUrl) return null;
+
+    // Normalize primary field for downstream consumers (including native Sora)
+    item.downloadable_url = downloadUrl;
+    item.url = downloadUrl;
+
+    // Normalize download_urls collection while preserving existing values
+    const downloadUrls = { ...(item.download_urls || {}) };
+    if (!downloadUrls.no_watermark) downloadUrls.no_watermark = downloadUrl;
+    if (!downloadUrls.watermark) {
+      const wm = item?.encodings?.source_wm?.path;
+      if (wm) downloadUrls.watermark = wm;
+    }
+    item.download_urls = downloadUrls;
+
+    return downloadUrl;
+  }
 
   // == Badge & UI (Feed) ==
   function colorForAgeMin(ageMin) {
@@ -1277,7 +1417,7 @@
     const viewsStr = uv != null ? `👀 ${fmt(uv)}` : null;
     const irStr = irDisp ? `${irDisp} IR` : null;
     const rrStr = rrDisp ? `${rrDisp} RR` : null;
-    const ageStr = Number.isFinite(ageMin) ? fmtAgeMin(ageMin) : null;
+    const ageStr = Number.isFinite(ageMin) ? fmtAgeMinPill(ageMin) : null;
     const emojiStr = badgeEmojiFor(id, meta);
     const timeEmojiStr = (ageStr || emojiStr) ? [ageStr || '', emojiStr || ''].filter(Boolean).join(' ') : null;
 
@@ -1293,25 +1433,6 @@
     badge.dataset.key = newKey;
 
     badge.innerHTML = '';
-    if (durationStr) {
-      const dims = idToDimensions.get(id);
-      let modelName = '';
-      if (dims) {
-        const w = dims.width;
-        const h = dims.height;
-        // Check for Sora 2 (352x640 or 640x352)
-        if ((w === 352 && h === 640) || (w === 640 && h === 352)) {
-          modelName = ' Sora 2';
-        }
-        // Check for Sora 2 Pro (512x896 or 896x512)
-        else if ((w === 512 && h === 896) || (w === 896 && h === 512)) {
-          modelName = ' Sora 2 Pro';
-        }
-      }
-      const tooltip = `${durationStr}${modelName} video`;
-      const el = createPill(badge, `⏱ ${durationStr}`, tooltip, true);
-      el.style.background = pillBg;
-    }
     if (viewsStr) {
       let tooltip = `${fmtInt(uv)} Unique Views`;
       if (impactStr) {
@@ -1337,6 +1458,25 @@
       if (isSuperHot) {
         el.style.boxShadow = '0 0 10px 3px hsla(0, 100%, 50%, 0.7)';
       }
+    }
+    if (durationStr) {
+      const dims = idToDimensions.get(id);
+      let modelName = '';
+      if (dims) {
+        const w = dims.width;
+        const h = dims.height;
+        // Check for Sora 2 (352x640 or 640x352)
+        if ((w === 352 && h === 640) || (w === 640 && h === 352)) {
+          modelName = ' Sora 2';
+        }
+        // Check for Sora 2 Pro (512x896 or 896x512)
+        else if ((w === 512 && h === 896) || (w === 896 && h === 512)) {
+          modelName = ' Sora 2 Pro';
+        }
+      }
+      const tooltip = `${durationStr}${modelName} video`;
+      const el = createPill(badge, `${durationStr}`, tooltip, true);
+      el.style.background = pillBg;
     }
   } 
 
@@ -1479,6 +1619,19 @@
 
   // == Detail badge (post page only) ==
   
+  function teardownDetailBadge() {
+    if (detailBadgeRetryInterval) {
+      clearInterval(detailBadgeRetryInterval);
+      detailBadgeRetryInterval = null;
+    }
+    if (detailBadgeEl && document.contains(detailBadgeEl)) {
+      try {
+        detailBadgeEl.remove();
+      } catch {}
+    }
+    detailBadgeEl = null;
+  }
+
   // This function targets the visible video container
   function findDetailBadgeTarget() {
     // We look for the specific structure of the detail modal/page
@@ -1582,16 +1735,14 @@
 
 
   // Function to fetch post data when visiting a post page directly
-  async function fetchPostDataIfNeeded() {
-    if (!isPost()) return;
-    
-    const sid = currentSIdFromURL();
+  async function fetchPostDataIfNeeded(opts = {}) {
+    const forceDetail = !!opts.forceDetail;
+    const sid = opts.sidOverride || currentSIdFromURL();
     if (!sid) return;
-    
-    // Check if we already have data for this post
-    if (idToUnique.has(sid)) {
-      return; // Data already available
-    }
+    if (!isPost() && !opts.sidOverride) return;
+
+    // If we already have full data, no work.
+    if (!forceDetail && detailBadgeDataReady(sid)) return;
     
     // Try to load from storage first
     try {
@@ -1722,6 +1873,8 @@
     } catch (e) {
       dlog('feed', 'Error loading post data from storage', e);
     }
+
+    if (detailBadgeDataReady(sid)) return;
     
     // If not in storage, try fetching from feed endpoints
     // Try Top feed first (most likely to have the post)
@@ -1736,14 +1889,98 @@
         const json = await response.json();
         processFeedJson(json);
         // Check if we now have valid data (not just that the key exists)
-        if (idToUnique.get(sid) != null) return;
+        if (detailBadgeDataReady(sid)) return;
       }
     } catch (e) {
       dlog('feed', 'Error fetching Top feed for post data', e);
     }
+
+    // As a last resort (or when forced), hit the detail endpoint once.
+    if (forceDetail || !processedPostDetailIds.has(sid)) {
+      fetchPostDetailOnce(sid);
+    }
+  }
+
+  function detailBadgeDataReady(sid) {
+    if (!sid) return false;
+    return (
+      idToUnique.get(sid) != null &&
+      idToLikes.get(sid) != null &&
+      idToViews.get(sid) != null &&
+      idToRemixes.get(sid) != null &&
+      idToMeta.get(sid) != null
+    );
+  }
+
+  function detailBadgeCommentsReady(sid) {
+    if (!sid) return false;
+    return idToComments.get(sid) != null;
+  }
+
+  function renderDetailLoading(el) {
+    if (!el) return;
+    if (el.dataset.key === 'loading') return;
+    el.dataset.key = 'loading';
+    el.innerHTML = '';
+    try {
+      const pill = createPill(el, 'Loading...', null, false);
+      if (pill) pill.style.background = 'rgba(37,37,37,0.7)';
+    } catch {}
+  }
+
+  function rememberPostDetailTemplate(url) {
+    if (typeof url !== 'string') return;
+    try {
+      const m = url.match(/\/posts?\/(s_[A-Za-z0-9]+)/i);
+      if (!m) return;
+      const id = m[1];
+      lastPostDetailUrlTemplate = url.replace(id, '{sid}');
+    } catch {}
+  }
+
+  function buildPostDetailUrls(sid) {
+    const urls = [];
+    if (lastPostDetailUrlTemplate && lastPostDetailUrlTemplate.includes('{sid}')) {
+      urls.push(lastPostDetailUrlTemplate.replace('{sid}', sid));
+    }
+    // Fallback guesses; keep small and same-origin.
+    urls.push(`${location.origin}/posts/${sid}/tree`);
+    urls.push(`${location.origin}/backend/posts/${sid}/tree`);
+    return Array.from(new Set(urls));
+  }
+
+  async function fetchPostDetailOnce(sid) {
+    if (!sid) return;
+    if (processedPostDetailIds.has(sid) || pendingPostDetailIds.has(sid)) return;
+    pendingPostDetailIds.add(sid);
+    try {
+      const urls = buildPostDetailUrls(sid);
+      for (const url of urls) {
+        try {
+          const res = await fetch(url, {
+            method: 'GET',
+            credentials: 'include',
+            headers: { 'Accept': 'application/json' },
+          });
+          if (!res.ok) continue;
+          const json = await res.json();
+          if (!looksLikePostDetail(json)) continue;
+          processPostDetailJson(json);
+          // processPostDetailJson will mark processed for the current post.
+          if (processedPostDetailIds.has(sid)) break;
+        } catch {}
+      }
+    } finally {
+      pendingPostDetailIds.delete(sid);
+    }
   }
 
   function renderDetailBadge() {
+    if (!isPost()) {
+      teardownDetailBadge();
+      return;
+    }
+
     const el = ensureDetailBadgeContainer();
     
     // If no container found, or if we have one but want to clear it (e.g. navigated away)
@@ -1772,16 +2009,23 @@
       isLocked: lockedPostIds.has(sid)
     });
 
-    // If we don't have valid data, try to fetch it
-    // Require all primary metrics before showing pills for a clean, single render
-    const uv = idToUnique.get(sid);
-    const likes = idToLikes.get(sid);
-    const totalViews = idToViews.get(sid);
-    const comments = idToComments.get(sid);
-    const remixes = idToRemixes.get(sid);
-    const allMetricsReady = uv != null && likes != null && totalViews != null && comments != null && remixes != null;
+    // If we haven't processed the current post's detail payload yet, avoid showing
+    // placeholder/stale pills (e.g., zeros from ancestor/feed packets) until the
+    // dedicated post detail fetch lands.
+    const needsDetail = isPost() && !processedPostDetailIds.has(sid) && !detailBadgeDataReady(sid);
+    if (needsDetail) {
+      if (detailBadgeRetryInterval) {
+        clearInterval(detailBadgeRetryInterval);
+        detailBadgeRetryInterval = null;
+      }
+      fetchPostDataIfNeeded({ forceDetail: true, sidOverride: sid });
+      renderDetailLoading(el);
+      return;
+    }
 
-    if (!allMetricsReady) {
+    // If we don't have valid data, try to fetch it
+    const dataReady = detailBadgeDataReady(sid);
+    if (!dataReady) {
       // Clear any existing retry interval
       if (detailBadgeRetryInterval) {
         clearInterval(detailBadgeRetryInterval);
@@ -1796,21 +2040,8 @@
       const maxRetries = 20; // Try for up to 6 seconds (20 * 300ms)
       detailBadgeRetryInterval = setInterval(() => {
         retryCount++;
-        const checkUv = idToUnique.get(sid);
-        const checkMeta = idToMeta.get(sid);
-        const checkDuration = idToDuration.get(sid);
-        const checkLikes = idToLikes.get(sid);
-        const checkViews = idToViews.get(sid);
-        const checkComments = idToComments.get(sid);
-        const checkRemixes = idToRemixes.get(sid);
-        const ready =
-          checkUv != null &&
-          checkLikes != null &&
-          checkViews != null &&
-          checkComments != null &&
-          checkRemixes != null &&
-          checkMeta != null;
-        
+        const ready = detailBadgeDataReady(sid);
+
         // Only stop if we have ALL primary metrics (and meta) or we timed out
         if (ready || retryCount >= maxRetries) {
           clearInterval(detailBadgeRetryInterval);
@@ -1820,6 +2051,7 @@
       }, 300);
       
       el.innerHTML = ''; // Clear while loading
+      renderDetailLoading(el);
       return;
     }
     
@@ -1830,8 +2062,14 @@
     }
 
     // All primary metrics are present; render the pills
+    const uv = idToUnique.get(sid);
+    const likes = idToLikes.get(sid);
+    const totalViews = idToViews.get(sid);
+    const commentsVal = idToComments.get(sid);
+    const comments = commentsVal ?? 0;
+    const remixes = idToRemixes.get(sid) ?? 0;
 
-    const irRaw = interactionRate(likes, comments, uv);
+    const irRaw = commentsVal == null ? null : interactionRate(likes, comments, uv);
     const rrRaw = remixRate(likes, remixes);
     const irDisp = irRaw ? (parseFloat(irRaw) === 0 ? '0%' : irRaw) : null;
     const rrDisp = rrRaw == null ? null : +rrRaw === 0 ? '0%' : (rrRaw.endsWith('.00') ? rrRaw.slice(0, -3) : rrRaw) + '%';
@@ -1851,7 +2089,7 @@
     const viewsStr = uv != null ? `👀 ${fmt(uv)}` : null;
     const irStr = irDisp ? `${irDisp} IR` : null;
     const rrStr = rrDisp ? `${rrDisp} RR` : null;
-    const ageStr = Number.isFinite(ageMin) ? fmtAgeMin(ageMin) : null;
+    const ageStr = Number.isFinite(ageMin) ? fmtAgeMinPill(ageMin) : null;
     const emojiStr = badgeEmojiFor(sid, meta);
     const timeEmojiStr = (ageStr || emojiStr) ? [ageStr || '', emojiStr || ''].filter(Boolean).join(' ') : null;
 
@@ -1890,12 +2128,53 @@
     const bg = badgeBgFor(sid, meta);
     const pillBg = bg || 'rgba(37,37,37,0.7)';
     const newKey = JSON.stringify([durationStr, viewsStr, irStr, rrStr, impactStr, timeEmojiStr, pillBg]);
-    if (el.dataset.key === newKey) return;
+    const hasPills = el.querySelectorAll('.sora-uv-pill').length > 0;
+    if (el.dataset.key === newKey && hasPills) return;
     el.dataset.key = newKey;
     
     el.innerHTML = ''; 
     
-    // 1. Duration Pill (first position for prominence) - match feed badge exactly
+    // 1. Views Pill - match feed badge exactly
+    if (viewsStr) {
+      let tooltip = `${fmtInt(uv)} Unique Views`;
+      if (impactStr) {
+        tooltip += ` – ${fmtInt(totalViews)} Total Views – ${impactStr} Views Per Person`;
+      }
+      const metEl = createPill(el, viewsStr, tooltip, true);
+      metEl.style.background = pillBg;
+      metEl.style.pointerEvents = 'auto';
+    }
+    
+    // 2. IR Pill - match feed badge exactly
+    if (irStr) {
+      const metEl = createPill(el, irStr, 'Likes + Comments relative to Unique Views', true);
+      metEl.style.background = pillBg;
+      metEl.style.pointerEvents = 'auto';
+    }
+    
+    // 3. RR Pill - match feed badge exactly
+    if (rrStr) {
+      const metEl = createPill(el, rrStr, 'Total Remixes relative to Likes', true);
+      metEl.style.background = pillBg;
+      metEl.style.pointerEvents = 'auto';
+    }
+    
+    // 4. Time/Age Pill - match feed badge exactly
+    if (timeEmojiStr) {
+      const tip = Number.isFinite(ageMin) ? expireEtaTooltip(ageMin) : null;
+      const nearDay = isNearWholeDay(ageMin);
+      const tipFinal = tip || (nearDay ? 'This gen was posted at this time of day!' : null);
+      
+      const timeEl = createPill(el, timeEmojiStr, tipFinal, !!tipFinal);
+      timeEl.style.background = pillBg;
+      timeEl.style.pointerEvents = 'auto';
+
+      if (isSuperHot) {
+        timeEl.style.boxShadow = '0 0 10px 3px hsla(0, 100%, 50%, 0.7)';
+      }
+    }
+
+    // 5. Duration Pill - moved to end
     if (durationStr) {
       const dims = idToDimensions.get(sid);
       let modelName = '';
@@ -1912,49 +2191,9 @@
         }
       }
       const tooltip = `${durationStr}${modelName} video`;
-      const metEl = createPill(el, `⏱ ${durationStr}`, tooltip, true);
+      const metEl = createPill(el, `${durationStr}`, tooltip, true);
       metEl.style.background = pillBg;
       metEl.style.pointerEvents = 'auto';
-    }
-    
-    // 2. Views Pill - match feed badge exactly
-    if (viewsStr) {
-      let tooltip = `${fmtInt(uv)} Unique Views`;
-      if (impactStr) {
-        tooltip += ` – ${fmtInt(totalViews)} Total Views – ${impactStr} Views Per Person`;
-      }
-      const metEl = createPill(el, viewsStr, tooltip, true);
-      metEl.style.background = pillBg;
-      metEl.style.pointerEvents = 'auto';
-    }
-    
-    // 3. IR Pill - match feed badge exactly
-    if (irStr) {
-      const metEl = createPill(el, irStr, 'Likes + Comments relative to Unique Views', true);
-      metEl.style.background = pillBg;
-      metEl.style.pointerEvents = 'auto';
-    }
-    
-    // 4. RR Pill - match feed badge exactly
-    if (rrStr) {
-      const metEl = createPill(el, rrStr, 'Total Remixes relative to Likes', true);
-      metEl.style.background = pillBg;
-      metEl.style.pointerEvents = 'auto';
-    }
-    
-    // 5. Time/Age Pill - match feed badge exactly
-    if (timeEmojiStr) {
-      const tip = Number.isFinite(ageMin) ? expireEtaTooltip(ageMin) : null;
-      const nearDay = isNearWholeDay(ageMin);
-      const tipFinal = tip || (nearDay ? 'This gen was posted at this time of day!' : null);
-      
-      const timeEl = createPill(el, timeEmojiStr, tipFinal, !!tipFinal);
-      timeEl.style.background = pillBg;
-      timeEl.style.pointerEvents = 'auto';
-
-      if (isSuperHot) {
-        timeEl.style.boxShadow = '0 0 10px 3px hsla(0, 100%, 50%, 0.7)';
-      }
     }
 
     // Keep container pointerEvents: none to allow clicks to pass through to video controls, 
@@ -2273,14 +2512,13 @@
     
     // Try immediately and after a delay
     tryUpdateFeedButton();
-    setTimeout(tryUpdateFeedButton, 100);
-    setTimeout(tryUpdateFeedButton, 500);
     
     // Watch for DOM changes in case button is added dynamically
     const observer = new MutationObserver(() => {
       tryUpdateFeedButton();
     });
     observer.observe(document.body, { childList: true, subtree: true });
+    bar._feedButtonObserver = observer;
     
     // Add scroll event listener - update directly on every scroll
     const handleScroll = () => {
@@ -2288,6 +2526,11 @@
       updateFeedButtonPosition();
     };
     window.addEventListener('scroll', handleScroll, { passive: true });
+    bar._handleScroll = handleScroll;
+    bar._feedButtonTimers = [
+      setTimeout(tryUpdateFeedButton, 100),
+      setTimeout(tryUpdateFeedButton, 500),
+    ];
     
     // Store the update function on the bar for later use
     bar.updateBarPosition = updateBarPosition;
@@ -2374,6 +2617,8 @@
       let dropdownLabel;
       if (index === 0) {
         dropdownLabel = 'All Posts';
+      } else if (FILTER_STEPS_MIN[index] === 'no_remixes') {
+        dropdownLabel = 'No Remixes';
       } else {
         const hours = FILTER_STEPS_MIN[index] / 60; // Convert minutes to hours
         dropdownLabel = `Past ${hours} hours`;
@@ -2806,6 +3051,25 @@
     document.documentElement.appendChild(bar);
     controlBar = bar;
     return bar;
+  }
+
+  function teardownControlBar() {
+    const bar = controlBar;
+    if (!bar) return;
+    try {
+      if (bar._handleScroll) window.removeEventListener('scroll', bar._handleScroll);
+    } catch {}
+    try {
+      if (bar._feedButtonObserver) bar._feedButtonObserver.disconnect();
+    } catch {}
+    try {
+      const timers = Array.isArray(bar._feedButtonTimers) ? bar._feedButtonTimers : [];
+      for (const t of timers) clearTimeout(t);
+    } catch {}
+    try {
+      if (document.contains(bar)) bar.remove();
+    } catch {}
+    controlBar = null;
   }
 
 
@@ -3545,8 +3809,8 @@
       
       if (analyzeCameoSelectEl) {
         analyzeCameoSelectEl.innerHTML = 
-          '<option value="">Everyone</option>' +
-          sortedCameos.map(c => `<option value="${c.username}">${c.username} (${c.count})</option>`).join('');
+        '<option value="">Everyone</option>' +
+        sortedCameos.map(c => `<option value="${esc(c.username)}">${esc(c.username)} (${fmtInt(c.count)})</option>`).join('');
         
         if (analyzeCameoFilterUsername) {
           analyzeCameoSelectEl.value = analyzeCameoFilterUsername;
@@ -3993,9 +4257,9 @@ async function renderAnalyzeTable(force = false) {
     }
 
     const table = analyzeTableEl;
-    const oldTbody = table.tBodies[0];
     const swap = () => {
-      if (oldTbody) table.replaceChild(newTbody, oldTbody);
+      const currentBody = table.tBodies[0];
+      if (currentBody) table.replaceChild(newTbody, currentBody);
       else table.appendChild(newTbody);
     };
     if ('requestAnimationFrame' in window) requestAnimationFrame(swap);
@@ -4004,23 +4268,36 @@ async function renderAnalyzeTable(force = false) {
     const isAnalyzing = !!(analyzeRapidScrollId || analyzeCountdownIntervalId);
     if (!isAnalyzing && analyzeHeaderTextEl) {
       const hoursLabel = (n) => (Number(n) === 1 ? '1 hour' : `${n} hours`);
+      const fmtNum = (n) => (Number.isFinite(n) ? n.toLocaleString('en-US') : '0');
+      const totals = rows.reduce(
+        (acc, r) => {
+          acc.views += Number.isFinite(r.views) ? r.views : 0;
+          acc.likes += Number.isFinite(r.likes) ? r.likes : 0;
+          acc.remixes += Number.isFinite(r.remixes) ? r.remixes : 0;
+          acc.comments += Number.isFinite(r.comments) ? r.comments : 0;
+          return acc;
+        },
+        { views: 0, likes: 0, remixes: 0, comments: 0 }
+      );
       const username = analyzeCameoFilterUsername;
       if (username) {
         // User selected in dropdown
         analyzeHeaderTextEl.textContent = rows.length
-          ? `${rows.length} top gen${rows.length === 1 ? '' : 's'} tied to ${username} from the last ${hoursLabel(analyzeWindowHours)}`
+          ? `You've seen ${rows.length} top gen${rows.length === 1 ? '' : 's'} tied to ${username} in the last ${hoursLabel(analyzeWindowHours)} totalling ${fmtNum(totals.views)} views, ${fmtNum(totals.likes)} likes, ${fmtNum(totals.remixes)} remixes, and ${fmtNum(totals.comments)} comments.`
           : `No top gens tied to ${username} for last ${hoursLabel(analyzeWindowHours)}... run Gather mode!`;
       } else {
         // Everyone selected (no filter)
         analyzeHeaderTextEl.textContent = rows.length
-          ? `You've seen ${rows.length} top gens in the last ${hoursLabel(analyzeWindowHours)}.`
+          ? `You've seen ${rows.length} top gen${rows.length === 1 ? '' : 's'} in the last ${hoursLabel(analyzeWindowHours)} totalling ${fmtNum(totals.views)} views, ${fmtNum(totals.likes)} likes, ${fmtNum(totals.remixes)} remixes, and ${fmtNum(totals.comments)} comments.`
           : `No gens for last ${hoursLabel(analyzeWindowHours)}... run Gather mode!`;
       }
       // Show helper text if there are rows
       // BUT hide it during gather mode OR during rapid analyze gather
       if (analyzeHelperTextEl) {
         const isRapidGathering = !!(analyzeRapidScrollId || analyzeCountdownIntervalId);
-        const shouldShow = rows.length > 0 && !(isTopFeed() && (isGatheringActiveThisTab || isRapidGathering));
+        const winH = Number(analyzeWindowHours) || 24;
+        const shouldShow =
+          (rows.length > 0 || winH <= 1) && !(isTopFeed() && (isGatheringActiveThisTab || isRapidGathering));
         analyzeHelperTextEl.style.display = shouldShow ? '' : 'none';
       }
     }
@@ -4050,49 +4327,61 @@ async function renderAnalyzeTable(force = false) {
     analyzeTableEl.style.display = show ? '' : 'none';
   }
 
-  function sortRows(rows) {
-    const key = analyzeSortKey;
-    const dir = analyzeSortDir === 'asc' ? 1 : -1;
-    rows.sort((a, b) => {
-      if (key === 'prompt') {
-        const aLen = (a.caption || '').replace(/\s+/g, ' ').trim().length;
-        const bLen = (b.caption || '').replace(/\s+/g, ' ').trim().length;
-        return (aLen - bLen) * dir;
-      }
-      if (key === 'post') {
-        const aUser = (a.ownerHandle || '').toLowerCase();
-        const bUser = (b.ownerHandle || '').toLowerCase();
-        if (aUser !== bUser) return aUser.localeCompare(bUser) * dir;
-        const aCap = (a.caption || a.id || '').toLowerCase();
-        const bCap = (b.caption || b.id || '').toLowerCase();
-        return aCap.localeCompare(bCap) * dir;
-      }
-      if (key === 'views') return (a.views - b.views) * dir;
-      if (key === 'duration') {
-        // Parse duration strings like "10s" or "10.5s" to numeric values for sorting
-        const parseDuration = (d) => {
-          if (!d || d === '—') return -1;
-          const match = d.match(/^(\d+(?:\.\d+)?)s$/);
-          return match ? parseFloat(match[1]) : -1;
-        };
-        const aDur = parseDuration(a.duration);
-        const bDur = parseDuration(b.duration);
-        if (aDur !== bDur) {
-          return (aDur - bDur) * dir;
-        }
-        // If durations are equal, sort by views (descending)
-        return b.views - a.views;
-      }
-      if (key === 'likes') return (a.likes - b.likes) * dir;
-      if (key === 'remixes') return (a.remixes - b.remixes) * dir;
-      if (key === 'comments') return (a.comments - b.comments) * dir;
-      if (key === 'rr') return ((a.rrPctVal ?? -1) - (b.rrPctVal ?? -1)) * dir;
-      if (key === 'ir') return ((a.irPctVal ?? -1) - (b.irPctVal ?? -1)) * dir;
-      if (key === 'expiring') return (a.expiringMin - b.expiringMin) * dir;
-      return 0;
-    });
-    return rows;
-  }
+	  function sortRows(rows) {
+	    const key = analyzeSortKey;
+	    const dir = analyzeSortDir === 'asc' ? 1 : -1;
+	    rows.sort((a, b) => {
+	      const aViews = Number(a.views) || 0;
+	      const bViews = Number(b.views) || 0;
+	      let primary = 0;
+	      if (key === 'prompt') {
+	        const aLen = (a.caption || '').replace(/\s+/g, ' ').trim().length;
+	        const bLen = (b.caption || '').replace(/\s+/g, ' ').trim().length;
+	        primary = (aLen - bLen) * dir;
+	      }
+	      else if (key === 'post') {
+	        const aUser = (a.ownerHandle || '').toLowerCase();
+	        const bUser = (b.ownerHandle || '').toLowerCase();
+	        if (aUser !== bUser) primary = aUser.localeCompare(bUser) * dir;
+	        const aCap = (a.caption || a.id || '').toLowerCase();
+	        const bCap = (b.caption || b.id || '').toLowerCase();
+	        if (!primary) primary = aCap.localeCompare(bCap) * dir;
+	      }
+	      else if (key === 'views') {
+	        primary = (aViews - bViews) * dir;
+	      }
+	      else if (key === 'duration') {
+	        // Parse duration strings like "10s" or "10.5s" to numeric values for sorting
+	        const parseDuration = (d) => {
+	          if (!d || d === '—') return -1;
+	          const match = d.match(/^(\d+(?:\.\d+)?)s$/);
+	          return match ? parseFloat(match[1]) : -1;
+	        };
+	        const aDur = parseDuration(a.duration);
+	        const bDur = parseDuration(b.duration);
+	        if (aDur !== bDur) {
+	          primary = (aDur - bDur) * dir;
+	        }
+	        // If durations are equal, fall through to views tiebreaker below
+	      }
+	      else if (key === 'likes') primary = (a.likes - b.likes) * dir;
+	      else if (key === 'remixes') primary = (a.remixes - b.remixes) * dir;
+	      else if (key === 'comments') primary = (a.comments - b.comments) * dir;
+	      else if (key === 'rr') primary = ((a.rrPctVal ?? -1) - (b.rrPctVal ?? -1)) * dir;
+	      else if (key === 'ir') primary = ((a.irPctVal ?? -1) - (b.irPctVal ?? -1)) * dir;
+	      else if (key === 'expiring') primary = (a.expiringMin - b.expiringMin) * dir;
+
+	      if (primary) return primary;
+	      // For any tie in the active sort column, secondary-sort by decreasing views.
+	      if (key !== 'views') {
+	        const viewDiff = bViews - aViews;
+	        if (viewDiff) return viewDiff;
+	      }
+	      // Final deterministic tiebreaker.
+	      return String(a.id || '').localeCompare(String(b.id || ''));
+	    });
+	    return rows;
+	  }
 
 
   function hideAllCards(hide) {
@@ -4143,7 +4432,9 @@ async function renderAnalyzeTable(force = false) {
           const hasRows = !!(analyzeTableEl && analyzeTableEl.tBodies[0] && analyzeTableEl.tBodies[0].rows.length);
           // After rapid gather completes, show helper text if there are rows
           if (analyzeHelperTextEl) {
-            analyzeHelperTextEl.style.display = hasRows ? '' : 'none';
+            const winH = Number(analyzeWindowHours) || 24;
+            const shouldShow = hasRows || winH <= 1;
+            analyzeHelperTextEl.style.display = shouldShow ? '' : 'none';
           }
         } catch {}
       }, 0);
@@ -4220,7 +4511,9 @@ async function renderAnalyzeTable(force = false) {
           // Hide helper text during gather mode OR during rapid analyze gather
           if (analyzeHelperTextEl) {
             const isRapidGathering = !!(analyzeRapidScrollId || analyzeCountdownIntervalId);
-            const shouldShow = hasRows && !(isTopFeed() && (isGatheringActiveThisTab || isRapidGathering));
+            const winH = Number(analyzeWindowHours) || 24;
+            const shouldShow =
+              (hasRows || winH <= 1) && !(isTopFeed() && (isGatheringActiveThisTab || isRapidGathering));
             analyzeHelperTextEl.style.display = shouldShow ? '' : 'none';
           }
         } catch {}
@@ -4241,7 +4534,9 @@ async function renderAnalyzeTable(force = false) {
           // Hide helper text during gather mode OR during rapid analyze gather
           if (analyzeHelperTextEl) {
             const isRapidGathering = !!(analyzeRapidScrollId || analyzeCountdownIntervalId);
-            const shouldShow = hasRows && !(isTopFeed() && (isGatheringActiveThisTab || isRapidGathering));
+            const winH = Number(analyzeWindowHours) || 24;
+            const shouldShow =
+              (hasRows || winH <= 1) && !(isTopFeed() && (isGatheringActiveThisTab || isRapidGathering));
             analyzeHelperTextEl.style.display = shouldShow ? '' : 'none';
           }
         } catch {}
@@ -4287,10 +4582,32 @@ async function renderAnalyzeTable(force = false) {
     for (const card of selectAllCards()) {
       const id = extractIdFromCard(card);
       const meta = idToMeta.get(id);
-      if (limitMin == null || isGatheringActiveThisTab) {
+      // If we're not on a page where filters apply, don't hide anything.
+      // Apply filters on Profile and all Explore feeds.
+      // Sora may update the URL to `/explore` while still showing the same Explore tab (top/latest/following),
+      // so do not rely on `feed=top` being present to decide whether filtering should apply.
+      // Also apply on Post routes: opening a post from Explore often updates the URL to `/p/...` while the
+      // Explore grid remains mounted underneath a modal, and we want to keep the filtered view stable.
+      if ((!isProfile() && !isExplore() && !isPost()) || limitMin == null || isGatheringActiveThisTab) {
         card.style.display = '';
         continue;
       }
+
+      if (limitMin === 'no_remixes') {
+        // Only meaningful on Explore/Post (modal-over-explore); elsewhere don't hide.
+        if (!isExplore() && !isPost()) {
+          card.style.display = '';
+          continue;
+        }
+        const rx = idToRemixes.get(id);
+        // Show only posts we definitively know have zero remixes.
+        // If remix count is unknown yet, hide until data arrives (like time filters).
+        const nRx = Number(rx);
+        const show = Number.isFinite(nRx) && nRx === 0;
+        card.style.display = show ? '' : 'none';
+        continue;
+      }
+
       const show = Number.isFinite(meta?.ageMin) && meta.ageMin <= limitMin;
       card.style.display = show ? '' : 'none';
     }
@@ -4575,12 +4892,63 @@ async function renderAnalyzeTable(force = false) {
     }
   }
 
+  function decorateDraftsResponse(res) {
+    if (!res || typeof res.json !== 'function' || res._soraUvDraftsPatched) return res;
+    res._soraUvDraftsPatched = true;
+
+    const origJson = res.json.bind(res);
+    res.json = async () => {
+      const data = await origJson();
+      return normalizeDraftsJsonForDownload(data);
+    };
+
+    const origClone = typeof res.clone === 'function' ? res.clone.bind(res) : null;
+    if (origClone) {
+      res.clone = () => {
+        const cloned = origClone();
+        try {
+          decorateDraftsResponse(cloned);
+        } catch {}
+        return cloned;
+      };
+    }
+    return res;
+  }
+
+  // If pending v2 is unavailable, we can still populate drafts metadata by calling the drafts endpoint directly.
+  // Throttle to avoid spamming in case Sora repeatedly polls a broken endpoint.
+  const DRAFTS_BACKUP_THROTTLE_MS = 15000;
+  let draftsBackupInFlight = false;
+  let draftsBackupLastAttemptMs = 0;
+  function scheduleDraftsBackupFetch(reason) {
+    try {
+      if (!isDrafts()) return;
+      const now = Date.now();
+      if (draftsBackupInFlight) return;
+      if (now - draftsBackupLastAttemptMs < DRAFTS_BACKUP_THROTTLE_MS) return;
+      draftsBackupLastAttemptMs = now;
+      draftsBackupInFlight = true;
+      const url = `${location.origin}/backend/project_y/profile/drafts?limit=15`;
+      fetch(url).catch(() => {}).finally(() => { draftsBackupInFlight = false; });
+      dlog('drafts', 'scheduled drafts backup fetch', { reason });
+    } catch {}
+  }
+
   function installFetchSniffer() {
     dlog('feed', 'install fetch sniffer');
+    const isLikelyJsonResponse = (res) => {
+      try {
+        const ct = String(res?.headers?.get?.('content-type') || '').toLowerCase();
+        return ct.includes('application/json') || ct.includes('+json');
+      } catch {
+        return false;
+      }
+    };
     const origFetch = window.fetch;
     window.fetch = async function (input, init) {
       const res = await origFetch.apply(this, arguments);
       try {
+        if (isDraftDetail()) return res;
         const url = typeof input === 'string' ? input : input?.url || '';
 
         // Intercept /backend/nf/create to capture task_id -> source draft mapping for draft remixes
@@ -4599,9 +4967,19 @@ async function renderAnalyzeTable(force = false) {
           }
         }
 
+        // Pending tasks (v2): used by Sora to show running gens; parse to hydrate prompts/drafts.
+        if (NF_PENDING_V2_RE.test(url)) {
+          if (!res.ok) scheduleDraftsBackupFetch('pending_v2_not_ok');
+          res.clone().json().then(processPendingV2Json).catch(() => {
+            scheduleDraftsBackupFetch('pending_v2_parse_failed');
+          });
+          return res;
+        }
+
         // Check POST_DETAIL_RE, DRAFTS_RE and CHARACTERS_RE before FEED_RE since they would also match FEED_RE
         if (POST_DETAIL_RE.test(url)) {
           dlog('feed', 'fetch matched post detail', { url });
+          rememberPostDetailTemplate(url);
           res.clone().json().then((j) => {
             dlog('feed', 'post detail parsed', { url, hasPost: !!j?.post, hasRemixes: !!j?.remix_posts?.items });
             processPostDetailJson(j);
@@ -4613,6 +4991,7 @@ async function renderAnalyzeTable(force = false) {
             console.error('[SoraUV] Error parsing characters fetch response:', err);
           });
         } else if (DRAFTS_RE.test(url)) {
+          decorateDraftsResponse(res);
           res.clone().json().then(processDraftsJson).catch((err) => {
             console.error('[SoraUV] Error parsing drafts fetch response:', err);
           });
@@ -4627,19 +5006,22 @@ async function renderAnalyzeTable(force = false) {
             })
             .catch(() => {});
         } else if (typeof url === 'string' && url.startsWith(location.origin)) {
-          res
-            .clone()
-            .json()
-            .then((j) => {
-              if (looksLikePostDetail(j)) {
-                dlog('feed', 'fetch autodetected post detail', { url, hasPost: !!j?.post });
-                processPostDetailJson(j);
-              } else if (looksLikeSoraFeed(j)) {
-                dlog('feed', 'fetch autodetected feed', { url, items: (j?.items || j?.data?.items || []).length });
-                processFeedJson(j);
-              }
-            })
-            .catch(() => {});
+          // Avoid cloning/parsing bodies for non-JSON same-origin requests (can be very expensive on /d/...).
+          if (isLikelyJsonResponse(res)) {
+            res
+              .clone()
+              .json()
+              .then((j) => {
+                if (looksLikePostDetail(j)) {
+                  dlog('feed', 'fetch autodetected post detail', { url, hasPost: !!j?.post });
+                  processPostDetailJson(j);
+                } else if (looksLikeSoraFeed(j)) {
+                  dlog('feed', 'fetch autodetected feed', { url, items: (j?.items || j?.data?.items || []).length });
+                  processFeedJson(j);
+                }
+              })
+              .catch(() => {});
+          }
         }
       } catch {}
       return res;
@@ -4648,11 +5030,12 @@ async function renderAnalyzeTable(force = false) {
     XMLHttpRequest.prototype.open = function (method, url) {
       this.addEventListener('load', function () {
         try {
-          if (typeof url === 'string') {
-            // Intercept /backend/nf/create for draft remix tracking
-            if (NF_CREATE_RE.test(url)) {
-              const draftRemixMatch = location.pathname.match(/^\/d\/([A-Za-z0-9_-]+)/i);
-              if (draftRemixMatch && location.search.includes('remix')) {
+          if (isDraftDetail()) return;
+            if (typeof url === 'string') {
+              // Intercept /backend/nf/create for draft remix tracking
+              if (NF_CREATE_RE.test(url)) {
+                const draftRemixMatch = location.pathname.match(/^\/d\/([A-Za-z0-9_-]+)/i);
+                if (draftRemixMatch && location.search.includes('remix')) {
                 const sourceDraftId = draftRemixMatch[1];
                 try {
                   const json = JSON.parse(this.responseText);
@@ -4662,13 +5045,25 @@ async function renderAnalyzeTable(force = false) {
                     dlog('drafts', `Saved task->draft mapping (XHR): ${taskId} -> ${sourceDraftId}`);
                   }
                 } catch {}
+                }
               }
-            }
 
-            // Check POST_DETAIL_RE, CHARACTERS_RE and DRAFTS_RE before FEED_RE since they would also match FEED_RE
-            if (POST_DETAIL_RE.test(url)) {
-              dlog('feed', 'xhr matched post detail', { url });
-              try {
+              // Pending tasks (v2): parse to hydrate prompts/drafts; fall back to drafts endpoint if unavailable.
+              if (NF_PENDING_V2_RE.test(url)) {
+                if (this.status && this.status >= 400) scheduleDraftsBackupFetch('pending_v2_xhr_not_ok');
+                try {
+                  processPendingV2Json(JSON.parse(this.responseText));
+                } catch {
+                  scheduleDraftsBackupFetch('pending_v2_xhr_parse_failed');
+                }
+                return;
+              }
+
+              // Check POST_DETAIL_RE, CHARACTERS_RE and DRAFTS_RE before FEED_RE since they would also match FEED_RE
+              if (POST_DETAIL_RE.test(url)) {
+                dlog('feed', 'xhr matched post detail', { url });
+                rememberPostDetailTemplate(url);
+                try {
                 const j = JSON.parse(this.responseText);
                 dlog('feed', 'post detail parsed (XHR)', { url, hasPost: !!j?.post, hasRemixes: !!j?.remix_posts?.items });
                 processPostDetailJson(j);
@@ -4696,13 +5091,16 @@ async function renderAnalyzeTable(force = false) {
               } catch {}
             } else if (url.startsWith(location.origin)) {
               try {
-                const j = JSON.parse(this.responseText);
-                if (looksLikePostDetail(j)) {
-                  dlog('feed', 'xhr autodetected post detail', { url, hasPost: !!j?.post });
-                  processPostDetailJson(j);
-                } else if (looksLikeSoraFeed(j)) {
-                  dlog('feed', 'xhr autodetected feed', { url, items: (j?.items || j?.data?.items || []).length });
-                  processFeedJson(j);
+                const ct = String(this.getResponseHeader('content-type') || '').toLowerCase();
+                if (ct.includes('application/json') || ct.includes('+json')) {
+                  const j = JSON.parse(this.responseText);
+                  if (looksLikePostDetail(j)) {
+                    dlog('feed', 'xhr autodetected post detail', { url, hasPost: !!j?.post });
+                    processPostDetailJson(j);
+                  } else if (looksLikeSoraFeed(j)) {
+                    dlog('feed', 'xhr autodetected feed', { url, items: (j?.items || j?.data?.items || []).length });
+                    processFeedJson(j);
+                  }
                 }
               } catch {}
             }
@@ -4760,8 +5158,15 @@ async function renderAnalyzeTable(force = false) {
       // Safety check: ensure we don't process comments/replies as if they were the main post
       // This happens because comments often contain the post_id they belong to, and getItemId finds it via deep search
       const rawP = it?.post || it || {};
-      if (rawP.post_id && rawP.post_id === id && rawP.id !== id) {
-        continue;
+      if (rawP.id !== id) {
+        const refs = [
+          rawP.post_id,
+          rawP.parent_post_id,
+          rawP.root_post_id,
+          rawP.source_post_id,
+          rawP.remix_target_post_id,
+        ];
+        if (refs.some((r) => typeof r === 'string' && r === id)) continue;
       }
 
       const uv = getUniqueViews(it);
@@ -4859,12 +5264,22 @@ async function renderAnalyzeTable(force = false) {
         if (val == null) return;
         const existing = map.get(id);
         const isLocked = lockedPostIds.has(id);
+
+        // Allow zero for comments/remixes (legit "no activity") and for likes when we also
+        // have another primary metric in this packet. Keep guarding UV/views zeros to avoid
+        // placeholder/stale packets.
+        if (val === 0 && existing == null) {
+          const allowZero =
+            map === idToComments ||
+            map === idToRemixes ||
+            (map === idToLikes && (uv != null || tv != null));
+          if (!allowZero) return;
+        }
+
         if (isLocked) {
           // For locked posts, only allow improvements (greater than existing)
           if (existing == null || val > existing) {
             map.set(id, val);
-          } else if (existing > 0 && val === 0) {
-            dlog('feed', 'BLOCKED: locked post metric zero overwrite', { id, existing, val });
           }
         } else {
           // For unlocked posts, allow typical improvements / first set
@@ -4889,7 +5304,27 @@ async function renderAnalyzeTable(force = false) {
       // Respect locks so the current post's meta (age/timestamp) is not overwritten by other packets
       const isLockedMeta = lockedPostIds.has(id);
       const existingMeta = idToMeta.get(id);
-      if (!isLockedMeta || !existingMeta) {
+      let shouldUpdateMeta = true;
+      if (isLockedMeta) {
+        shouldUpdateMeta = false;
+      } else if (existingMeta && Number.isFinite(existingMeta.ageMin) && Number.isFinite(ageMin)) {
+        // Prevent overwriting with a significantly smaller ageMin (would make post appear newer)
+        // This protects against ancestors/related posts corrupting the main post's timestamp
+        // A post's age should only increase over time, never decrease significantly
+        if (existingMeta.ageMin > ageMin + 5) {
+          // The new ageMin is smaller - post would appear younger
+          // Only allow this if the difference is very small (natural variance)
+          shouldUpdateMeta = false;
+          dlog('feed', 'prevented meta update - new ageMin smaller than existing', {
+            id,
+            existingAgeMin: existingMeta.ageMin,
+            newAgeMin: ageMin,
+            diff: existingMeta.ageMin - ageMin
+          });
+        }
+      }
+
+      if (shouldUpdateMeta) {
         idToMeta.set(id, { ageMin, userHandle });
       }
 
@@ -5097,6 +5532,15 @@ async function renderAnalyzeTable(force = false) {
     try {
       // Process the main post FIRST and LOCK it to prevent remix/ancestor data from overwriting it
       if (json?.post && mainPostId) {
+        // For the CURRENT post, clear any stale meta before processing to ensure
+        // fresh data from the API response is always used. This fixes the bug where
+        // navigating original -> remix -> back to original could show stale timestamp
+        // data from when the original was processed as an ancestor.
+        if (isCurrentPost) {
+          idToMeta.delete(mainPostId);
+          dlog('feed', 'cleared stale meta for current post before processing', { id: mainPostId });
+        }
+        
         const postWrapper = { post: json.post };
         if (json.profile) {
           postWrapper.profile = json.profile;
@@ -5113,7 +5557,8 @@ async function renderAnalyzeTable(force = false) {
             uv: json.post.unique_view_count,
             likes: json.post.like_count,
             stored_uv: idToUnique.get(mainPostId),
-            stored_likes: idToLikes.get(mainPostId)
+            stored_likes: idToLikes.get(mainPostId),
+            stored_meta: idToMeta.get(mainPostId)
           });
         } else {
           dlog('feed', 'processed main post (not current, not locked)', { id: mainPostId, currentSid });
@@ -5140,10 +5585,9 @@ async function renderAnalyzeTable(force = false) {
         dlog('feed', 'processed remix_posts', { count: json.remix_posts.items.length });
       }
       
-      // Process children (replies/comments)
+      // Skip children (replies/comments). We only collect posts and remixes.
       if (json?.children?.items && Array.isArray(json.children.items)) {
-        processFeedJson({ items: json.children.items });
-        dlog('feed', 'processed children', { count: json.children.items.length });
+        dlog('feed', 'skipped children (comments)', { count: json.children.items.length });
       }
       
       // Verify main post data is still correct after all processing
@@ -5163,9 +5607,65 @@ async function renderAnalyzeTable(force = false) {
     }
   }
 
+  function looksLikePendingV2Task(item) {
+    if (!item || typeof item !== 'object') return false;
+    const id = item?.id;
+    const status = item?.status;
+    const hasGenerationsArray = Array.isArray(item?.generations);
+    return typeof id === 'string' && id.startsWith('task_') && typeof status === 'string' && hasGenerationsArray;
+  }
+
+  function extractDraftItemsFromPayload(json) {
+    if (!json) return [];
+
+    // Pending v2: array of tasks with nested `generations`
+    if (Array.isArray(json)) {
+      const isPendingV2 = json.some(looksLikePendingV2Task);
+      if (!isPendingV2) return json;
+
+      const gens = [];
+      for (const task of json) {
+        if (!looksLikePendingV2Task(task)) continue;
+        const taskId = task?.id;
+        const taskPrompt = typeof task?.prompt === 'string' ? task.prompt : null;
+        if (taskId && taskPrompt) taskToPrompt.set(taskId, taskPrompt);
+
+        const taskGens = Array.isArray(task?.generations) ? task.generations : [];
+        for (const gen of taskGens) {
+          if (!gen || typeof gen !== 'object') continue;
+
+          // Annotate generations with their originating task for downstream draft-remix mapping.
+          if (taskId && gen.task_id == null) gen.task_id = taskId;
+
+          // Pending v2 tasks include `prompt`; drafts payloads often include it under `creation_config.prompt`.
+          if (taskPrompt) {
+            const cc = gen?.creation_config;
+            if (!cc || typeof cc !== 'object') gen.creation_config = {};
+            if (!gen.creation_config.prompt) gen.creation_config.prompt = taskPrompt;
+          }
+
+          gens.push(gen);
+        }
+      }
+      return gens;
+    }
+
+    // Drafts endpoint: { items: [...] } (sometimes wrapped), plus legacy shapes.
+    const items = json?.items || json?.data?.items || json?.generations || [];
+    return Array.isArray(items) ? items : [];
+  }
+
+  function processPendingV2Json(json) {
+    const gens = extractDraftItemsFromPayload(json);
+    if (!Array.isArray(gens) || gens.length === 0) return;
+
+    // Reuse draft processing pipeline.
+    processDraftsJson({ generations: gens });
+  }
+
   function processDraftsJson(json) {
     // Extract draft data from API response
-    const items = json?.items || json?.data?.items || json?.generations || [];
+    const items = extractDraftItemsFromPayload(json);
     if (!Array.isArray(items) || items.length === 0) return;
 
     for (const item of items) {
@@ -5188,16 +5688,18 @@ async function renderAnalyzeTable(force = false) {
         }
 
         // Extract prompt from creation_config
-        const prompt = item?.creation_config?.prompt;
+        const taskIdForPrompt = item?.task_id;
+        const prompt =
+          (typeof item?.creation_config?.prompt === 'string' && item.creation_config.prompt) ||
+          (typeof item?.prompt === 'string' && item.prompt) ||
+          (taskIdForPrompt && taskToPrompt.has(taskIdForPrompt) ? taskToPrompt.get(taskIdForPrompt) : null);
         if (prompt && typeof prompt === 'string') {
           idToPrompt.set(draftId, prompt);
         }
 
-        // Extract downloadable_url
-        const downloadUrl = item?.downloadable_url;
-        if (downloadUrl && typeof downloadUrl === 'string') {
-          idToDownloadUrl.set(draftId, downloadUrl);
-        }
+        // Normalize best download URL for both Sora-native button and our buttons
+        const downloadUrl = applyBestDownloadUrlToItem(item);
+        if (downloadUrl) idToDownloadUrl.set(draftId, downloadUrl);
 
         // Extract content violation status
         if (item?.kind === 'sora_content_violation') {
@@ -5228,6 +5730,19 @@ async function renderAnalyzeTable(force = false) {
 
     // Trigger render to show all draft buttons and badges
     renderDraftButtons();
+  }
+
+  function normalizeDraftsJsonForDownload(json) {
+    try {
+      const items = extractDraftItemsFromPayload(json);
+      if (!Array.isArray(items)) return json;
+      for (const item of items) {
+        applyBestDownloadUrlToItem(item);
+      }
+    } catch (e) {
+      console.error('[SoraUV] Error normalizing drafts JSON for download:', e);
+    }
+    return json;
   }
 
   function processCharactersJson(json) {
@@ -5280,24 +5795,163 @@ async function renderAnalyzeTable(force = false) {
     renderCharacterStats();
   }
 
-  function addCharacterSortButton() {
-    // Find the Characters dialog header by looking for dialog with "Characters" title
-    const dialog = document.querySelector('div[role="dialog"]');
-    if (!dialog) {
-      // Dialog closed, reset button reference
-      characterSortBtn = null;
-      return;
+  function scheduleEnsureAllCharactersLoadedInDialog(dialog) {
+    try {
+      if (!dialog || !dialog.isConnected) return;
+      if (dialog.dataset.soraUvCharAutoLoadDone === '1') return;
+      if (dialog.dataset.soraUvCharAutoLoadScheduled === '1') return;
+      dialog.dataset.soraUvCharAutoLoadScheduled = '1';
+      setTimeout(() => {
+        try {
+          delete dialog.dataset.soraUvCharAutoLoadScheduled;
+          ensureAllCharactersLoadedInDialog(dialog);
+        } catch {}
+      }, 50);
+    } catch {}
+  }
+
+  async function ensureAllCharactersLoadedInDialog(dialog) {
+    try {
+      if (!dialog || !dialog.isConnected) return;
+      if (dialog.dataset.soraUvCharAutoLoadDone === '1') return;
+      if (dialog.dataset.soraUvCharAutoLoadRunning === '1') return;
+
+      const now = Date.now();
+      if (now - charAutoLoadLastAttemptMs < 1500) return;
+      charAutoLoadLastAttemptMs = now;
+
+      dialog.dataset.soraUvCharAutoLoadRunning = '1';
+
+      const waitForCountChange = (prevCount, timeoutMs) =>
+        new Promise((resolve) => {
+          let done = false;
+          const finish = (count) => {
+            if (done) return;
+            done = true;
+            try {
+              obs.disconnect();
+            } catch {}
+            try {
+              clearTimeout(t);
+            } catch {}
+            resolve(count);
+          };
+          const obs = new MutationObserver(() => {
+            try {
+              const next = dialog.querySelectorAll('a[href^="/profile/"]').length;
+              if (next !== prevCount) finish(next);
+            } catch {}
+          });
+          try {
+            obs.observe(dialog, { childList: true, subtree: true });
+          } catch {}
+          const t = setTimeout(() => finish(prevCount), timeoutMs);
+        });
+
+      const findScrollContainer = () => {
+        const cand = dialog.querySelector('.overflow-y-auto');
+        if (cand && cand.scrollHeight > cand.clientHeight + 4) return cand;
+        const kids = Array.from(dialog.querySelectorAll('*'));
+        for (const el of kids) {
+          try {
+            if (el.scrollHeight > el.clientHeight + 4) {
+              const oy = getComputedStyle(el).overflowY;
+              if (oy === 'auto' || oy === 'scroll') return el;
+            }
+          } catch {}
+        }
+        return null;
+      };
+
+      const scroller = findScrollContainer();
+      if (!scroller) {
+        dialog.dataset.soraUvCharAutoLoadDone = '1';
+        return;
+      }
+
+      const startTop = scroller.scrollTop;
+      const MAX_EXPECTED = 25;
+      let prevCount = dialog.querySelectorAll('a[href^="/profile/"]').length;
+      let stableRounds = 0;
+
+      for (let i = 0; i < 14; i++) {
+        if (!dialog.isConnected) break;
+        if (prevCount >= MAX_EXPECTED) break;
+
+        // Force a "near bottom" scroll to trigger lazy-loading.
+        const prevTop = scroller.scrollTop;
+        scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight - 1);
+        scroller.scrollTop = scroller.scrollHeight;
+        if (scroller.scrollTop === prevTop) {
+          scroller.scrollTop = Math.max(0, prevTop - 1);
+          scroller.scrollTop = scroller.scrollHeight;
+        }
+        try {
+          scroller.dispatchEvent(new Event('scroll'));
+        } catch {}
+
+        const nextCount = await waitForCountChange(prevCount, 1600);
+        if (nextCount > prevCount) {
+          prevCount = nextCount;
+          stableRounds = 0;
+          continue;
+        }
+        stableRounds++;
+        if (stableRounds >= 3) break;
+      }
+
+      // If the user was at the top when the dialog opened, put them back there.
+      if (startTop <= 2) scroller.scrollTop = 0;
+
+      const loadedAll = prevCount >= MAX_EXPECTED || stableRounds >= 3;
+      if (loadedAll) dialog.dataset.soraUvCharAutoLoadDone = '1';
+
+      // Trigger another pass to apply stats/sort to newly-loaded items.
+      try {
+        requestAnimationFrame(() => {
+          try {
+            renderCharacterStats();
+          } catch {}
+        });
+      } catch {}
+    } catch {} finally {
+      try {
+        if (dialog) delete dialog.dataset.soraUvCharAutoLoadRunning;
+      } catch {}
     }
+  }
 
-    // Check if button already exists
-    if (dialog.querySelector('.sora-uv-char-sort-btn')) return;
+	  function addCharacterSortButton() {
+	    const findCharactersDialog = () => {
+	      const dialogs = Array.from(document.querySelectorAll('div[role="dialog"][data-state="open"], div[role="dialog"]'));
+	      for (const dialog of dialogs) {
+	        const headerText = dialog.querySelector('h2, [role="heading"]')?.textContent?.trim() || '';
+	        if (/edit characters/i.test(headerText)) return dialog;
+	      }
+	      for (const dialog of dialogs) {
+	        const headerText = dialog.querySelector('h2, [role="heading"]')?.textContent?.trim() || '';
+	        if (/characters/i.test(headerText)) return dialog;
+	      }
+	      return null;
+	    };
 
-    // Find the header by text content
-    const dialogHeader = Array.from(dialog.querySelectorAll('h2')).find(h => h.textContent === 'Characters');
-    if (!dialogHeader) return;
+	    const dialog = findCharactersDialog();
+	    if (!dialog) {
+	      characterSortBtn = null;
+	      return;
+	    }
 
-    const headerContainer = dialogHeader.parentElement;
-    if (!headerContainer) return;
+	    // Check if button already exists
+	    if (dialog.querySelector('.sora-uv-char-sort-btn')) return;
+
+	    // Find the header by text content
+	    const dialogHeader = Array.from(dialog.querySelectorAll('h2, [role="heading"]')).find(h =>
+	      /edit characters|characters/i.test(h.textContent || '')
+	    );
+	    if (!dialogHeader) return;
+
+	    const headerContainer = dialogHeader.parentElement;
+	    if (!headerContainer) return;
 
     // Create custom dropdown container
     const dropdownContainer = document.createElement('div');
@@ -5424,76 +6078,176 @@ async function renderAnalyzeTable(force = false) {
     headerContainer.appendChild(dropdownContainer);
   }
 
-  function sortCharacterList() {
-    // Find the character list container
-    const listContainer = document.querySelector('div[role="dialog"] .flex.flex-col.gap-1');
-    if (!listContainer) return;
+	  function sortCharacterList() {
+	    const findCharactersDialog = () => {
+	      const dialogs = Array.from(document.querySelectorAll('div[role="dialog"][data-state="open"], div[role="dialog"]'));
+	      for (const dialog of dialogs) {
+	        const headerText = dialog.querySelector('h2, [role="heading"]')?.textContent?.trim() || '';
+	        if (/edit characters/i.test(headerText)) return dialog;
+	      }
+	      return null;
+	    };
 
-    // Get all character link elements
-    const characterLinks = Array.from(listContainer.querySelectorAll('a[href^="/profile/"]'));
-    if (characterLinks.length === 0) return;
+	    const findCharacterListContainer = (root) => {
+	      const anchors = Array.from(root.querySelectorAll('a[href^="/profile/"]'));
+	      if (anchors.length === 0) return null;
 
-    // Create array of {element, username, stats} for sorting
-    const charactersData = characterLinks.map(link => {
-      const href = link.getAttribute('href');
-      const match = href?.match(/\/profile\/([^/?]+)/);
-      if (!match) return null;
+	      const parentToCount = new Map();
+	      for (const a of anchors) {
+	        const parent = a.parentElement;
+	        if (!parent) continue;
+	        const n = parent.querySelectorAll(':scope > a[href^="/profile/"]').length;
+	        if (n >= 2) parentToCount.set(parent, Math.max(n, parentToCount.get(parent) || 0));
+	      }
 
-      const username = match[1];
-      const userId = usernameToUserId.get(username.toLowerCase());
+	      let best = null;
+	      let bestN = 0;
+	      for (const [el, n] of parentToCount.entries()) {
+	        if (n > bestN) {
+	          best = el;
+	          bestN = n;
+	        }
+	      }
+	      return best || anchors[0].parentElement || null;
+	    };
 
-      const likes = userId ? (charToLikesCount.get(userId) || 0) : 0;
-      const createdAt = userId ? charToCreatedAt.get(userId) : null;
-      let likesPerDay = 0;
-      if (createdAt && likes > 0) {
-        // createdAt is a Unix timestamp in seconds, convert to milliseconds
-        const created = new Date(createdAt * 1000);
-        const now = new Date();
-        const daysSinceCreation = Math.max(1, (now - created) / (1000 * 60 * 60 * 24));
-        likesPerDay = likes / daysSinceCreation;
-      }
+	    const dialog = findCharactersDialog();
+	    const root = dialog || document;
+	    const listContainer = findCharacterListContainer(root);
+	    if (!listContainer) return;
 
-      return {
-        element: link,
-        username,
-        userId,
-        likes,
-        likesPerDay,
-        cameos: userId ? (charToCameoCount.get(userId) || 0) : 0,
-        originalIndex: userId ? (charToOriginalIndex.get(userId) ?? 9999) : 9999
-      };
-    }).filter(Boolean);
+	    // Only sort actual character rows; keep any non-character rows/buttons in place.
+	    const children = Array.from(listContainer.children);
+	    const sortableIndices = [];
+	    const characterLinks = [];
+	    for (let i = 0; i < children.length; i++) {
+	      const el = children[i];
+	      if (el?.matches?.('a[href^="/profile/"]')) {
+	        sortableIndices.push(i);
+	        characterLinks.push(el);
+	      }
+	    }
+	    if (characterLinks.length === 0) return;
 
-    // Sort based on current mode
-    if (characterSortMode === 'likes') {
-      charactersData.sort((a, b) => b.likes - a.likes);
-    } else if (characterSortMode === 'likesPerDay') {
-      charactersData.sort((a, b) => b.likesPerDay - a.likesPerDay);
-    } else if (characterSortMode === 'cameos') {
-      charactersData.sort((a, b) => b.cameos - a.cameos);
-    } else if (characterSortMode === 'date') {
-      // Sort by original index to restore default order
-      charactersData.sort((a, b) => a.originalIndex - b.originalIndex);
-    }
+	    // Create array of {element, username, stats} for sorting
+	    const charactersData = characterLinks.map((link, i) => {
+	      const href = link.getAttribute('href') || '';
+	      const match = href.match(/\/profile\/([^/?]+)/);
+	      const username = match ? match[1] : '';
+	      const userId = username ? usernameToUserId.get(username.toLowerCase()) : null;
 
-    // Reorder DOM elements
-    charactersData.forEach(char => {
-      listContainer.appendChild(char.element);
-    });
+	      const likes = userId ? (charToLikesCount.get(userId) || 0) : 0;
+	      const createdAt = userId ? charToCreatedAt.get(userId) : null;
+	      let likesPerDay = 0;
+	      if (createdAt && likes > 0) {
+	        // createdAt is a Unix timestamp in seconds, convert to milliseconds
+	        const created = new Date(createdAt * 1000);
+	        const now = new Date();
+	        const daysSinceCreation = Math.max(1, (now - created) / (1000 * 60 * 60 * 24));
+	        likesPerDay = likes / daysSinceCreation;
+	      }
 
-    dlog('characters', `Sorted ${charactersData.length} characters by ${characterSortMode}`);
-  }
+	      // Capture initial order for "date" fallback (before any sort).
+	      if (!link.dataset.soraUvCharOriginalIndex) {
+	        link.dataset.soraUvCharOriginalIndex = String(i);
+	      }
+	      const parsedFallback = Number.parseInt(link.dataset.soraUvCharOriginalIndex || '9999', 10);
+	      const fallbackOriginalIndex = Number.isFinite(parsedFallback) ? parsedFallback : 9999;
 
-  function renderCharacterStats() {
-    // Add sort button if dialog is open
-    addCharacterSortButton();
+	      return {
+	        element: link,
+	        username,
+	        userId,
+	        likes,
+	        likesPerDay,
+	        cameos: userId ? (charToCameoCount.get(userId) || 0) : 0,
+	        originalIndex: userId ? (charToOriginalIndex.get(userId) ?? fallbackOriginalIndex) : fallbackOriginalIndex
+	      };
+	    });
 
-    // Find all character links in the dialog
-    const characterLinks = document.querySelectorAll('a[href^="/profile/"]');
+	    // Sort based on current mode
+	    if (characterSortMode === 'likes') {
+	      charactersData.sort((a, b) => (b.likes - a.likes) || (a.originalIndex - b.originalIndex));
+	    } else if (characterSortMode === 'likesPerDay') {
+	      charactersData.sort((a, b) => (b.likesPerDay - a.likesPerDay) || (a.originalIndex - b.originalIndex));
+	    } else if (characterSortMode === 'cameos') {
+	      charactersData.sort((a, b) => (b.cameos - a.cameos) || (a.originalIndex - b.originalIndex));
+	    } else if (characterSortMode === 'date') {
+	      // Sort by original index to restore default order
+	      charactersData.sort((a, b) => a.originalIndex - b.originalIndex);
+	    }
 
-    let hasNewStats = false;
+	    // Reorder only the character rows; keep non-character rows (e.g. pinned top row, "create" row) in place.
+	    const sortedLinks = charactersData.map(c => c.element);
+	    const newChildren = children.slice();
+	    for (let i = 0; i < sortableIndices.length; i++) {
+	      newChildren[sortableIndices[i]] = sortedLinks[i];
+	    }
+	    for (const el of newChildren) listContainer.appendChild(el);
 
-    for (const link of characterLinks) {
+	    dlog('characters', `Sorted ${charactersData.length} characters by ${characterSortMode}`);
+	  }
+
+		  function renderCharacterStats() {
+		    // Only do work when we're actually in the Characters UI (dialog or characters page).
+		    let dialog = null;
+		    let inCharDialog = false;
+		    try {
+		      const dialogs = Array.from(document.querySelectorAll('div[role="dialog"][data-state="open"], div[role="dialog"]'));
+		      dialog =
+		        dialogs.find(d => /edit characters/i.test(d.querySelector('h2, [role="heading"]')?.textContent || '')) || null;
+		      const headerText = dialog?.querySelector?.('h2, [role="heading"]')?.textContent || '';
+		      inCharDialog = !!(dialog && /edit characters/i.test(headerText));
+		      // On profile pages, the character dialog can get too narrow; enforce a min width once.
+		      if (inCharDialog && !dialog.dataset.soraUvMinWidthSet) {
+		        if (!dialog.style.minWidth) dialog.style.minWidth = '524px';
+		        dialog.dataset.soraUvMinWidthSet = 'true';
+		      }
+		    } catch {}
+
+		    const inCharactersPage = /\/characters($|\?)/i.test(`${location.pathname}${location.search || ''}`);
+		    if (!inCharDialog && !inCharactersPage) return;
+
+		    // Add sort button if dialog is open
+		    addCharacterSortButton();
+
+		    // Force-load all characters in the dialog (lazy loads on scroll).
+		    if (inCharDialog && dialog) scheduleEnsureAllCharactersLoadedInDialog(dialog);
+
+		    // Capture default order for "date" fallback before any sorting.
+		    if (inCharDialog && dialog) {
+		      try {
+		        const anchors = Array.from(dialog.querySelectorAll('a[href^="/profile/"]'));
+		        const parentToCount = new Map();
+		        for (const a of anchors) {
+		          const parent = a.parentElement;
+		          if (!parent) continue;
+		          const n = parent.querySelectorAll(':scope > a[href^="/profile/"]').length;
+		          if (n >= 2) parentToCount.set(parent, Math.max(n, parentToCount.get(parent) || 0));
+		        }
+		        let listContainer = null;
+		        let bestN = 0;
+		        for (const [el, n] of parentToCount.entries()) {
+		          if (n > bestN) {
+		            listContainer = el;
+		            bestN = n;
+		          }
+		        }
+		        const directLinks = listContainer ? Array.from(listContainer.querySelectorAll(':scope > a[href^="/profile/"]')) : [];
+		        for (let i = 0; i < directLinks.length; i++) {
+		          const link = directLinks[i];
+		          if (!link.dataset.soraUvCharOriginalIndex) link.dataset.soraUvCharOriginalIndex = String(i);
+		        }
+		      } catch {}
+		    }
+
+		    // Find all character links (prefer scoping to dialog when present)
+		    const root = inCharDialog && dialog ? dialog : document;
+		    const characterLinks = root.querySelectorAll('a[href^="/profile/"]');
+
+	    let hasNewStats = false;
+
+	    for (const link of characterLinks) {
       // Skip if we've already added stats to this link
       if (link.querySelector('.sora-uv-char-stats')) continue;
 
@@ -5595,29 +6349,54 @@ async function renderAnalyzeTable(force = false) {
   }
 
   // == Observers & Lifecycle ==
+  function runRenderPass() {
+    if (isDraftDetail()) return;
+    const onExplore = isExplore();
+    const onProfile = isProfile();
+    const onPost = isPost();
+    const onDrafts = isDrafts();
+    const shouldRenderCards = onExplore || onProfile || onPost;
+
+    if (shouldRenderCards) renderBadges();
+    if (onPost) renderDetailBadge();
+    else teardownDetailBadge();
+    if (onProfile) renderProfileImpact();
+    if (onDrafts) {
+      renderBookmarkButtons();
+      renderDraftButtons();
+    }
+    // Character stats only matters on profile/characters views; it does its own internal gating.
+    if (location.pathname.includes('/profile')) renderCharacterStats();
+    updateControlsVisibility();
+    scheduleInjectDashboardButton();
+  }
+
   const mo = new MutationObserver(() => {
     if (mo._raf) cancelAnimationFrame(mo._raf);
     mo._raf = requestAnimationFrame(() => {
-      renderBadges();
-      renderDetailBadge();
-      renderProfileImpact();
-      renderBookmarkButtons();
-      renderDraftButtons();
-      renderCharacterStats();
-      updateControlsVisibility();
-      injectDashboardButton();
+      runRenderPass();
     });
   });
 
+  let observersActive = false;
+
   function startObservers() {
+    if (observersActive) return;
+    observersActive = true;
     mo.observe(document.documentElement, { childList: true, subtree: true });
-    renderBadges();
-    renderDetailBadge();
-    renderProfileImpact();
-    renderBookmarkButtons();
-    renderDraftButtons();
-    updateControlsVisibility();
-    injectDashboardButton();
+    runRenderPass();
+  }
+
+  function stopObservers() {
+    if (!observersActive) return;
+    observersActive = false;
+    try {
+      mo.disconnect();
+    } catch {}
+    try {
+      if (mo._raf) cancelAnimationFrame(mo._raf);
+    } catch {}
+    mo._raf = null;
   }
 
   function resetFilterFreshSlate() {
@@ -5647,15 +6426,45 @@ async function renderAnalyzeTable(force = false) {
   })();
 
   function forceStopGatherOnNavigation() {
-    if (isGatheringActiveThisTab) console.log('Sora UV: Route change — stopping gather for this tab.');
+    if (isGatheringActiveThisTab && DEBUG.feed) dlog('feed', 'Route change — stopping gather for this tab.');
     isGatheringActiveThisTab = false;
     stopGathering(false);
-    setGatherState({ filterIndex: 0, isGathering: false });
+    // Preserve any active filter across navigation; only stop gather state.
+    const s = getGatherState() || {};
+    s.isGathering = false;
+    delete s.refreshDeadline;
+    setGatherState(s);
     const bar = controlBar || ensureControlBar();
     if (bar && typeof bar.updateGatherState === 'function') bar.updateGatherState();
     if (bar && typeof bar.updateFilterLabel === 'function') bar.updateFilterLabel();
     if (analyzeActive) exitAnalyzeMode();
     applyFilter();
+  }
+
+  function resetFilterOnNavigation() {
+    const s = getGatherState() || {};
+    s.filterIndex = 0;
+    s.isGathering = false;
+    delete s.refreshDeadline;
+    setGatherState(s);
+    const bar = controlBar || ensureControlBar();
+    if (bar && typeof bar.updateFilterLabel === 'function') bar.updateFilterLabel();
+    applyFilter();
+  }
+
+  function routeKindFromRouteKey(rk) {
+    const path = String(rk || '').split('?')[0] || '';
+    if (path === '/explore' || path.startsWith('/explore/')) return 'explore';
+    if (/^\/p\/s_[A-Za-z0-9]+/i.test(path)) return 'post';
+    return 'other';
+  }
+
+  function shouldPreserveFilterAcrossNavigation(prevRouteKey, nextRouteKey) {
+    const a = routeKindFromRouteKey(prevRouteKey);
+    const b = routeKindFromRouteKey(nextRouteKey);
+    // Preserve the filter when navigating between Explore and Post pages,
+    // since Sora often changes the URL without actually changing the underlying feed state.
+    return (a === 'explore' || a === 'post') && (b === 'explore' || b === 'post');
   }
 
   function updateControlsVisibility() {
@@ -5775,11 +6584,55 @@ async function renderAnalyzeTable(force = false) {
 
   function onRouteChange() {
     const rk = routeKey();
-    const navigated = rk !== lastRouteKey;
+    const prev = lastRouteKey;
+    const navigated = rk !== prev;
     lastRouteKey = rk;
+
+    if (isDraftDetail()) {
+      // /d/... draft detail pages are extremely sensitive; avoid all injected work here.
+      try {
+        stopRapidAnalyzeGather();
+        stopAnalyzeAutoRefresh();
+      } catch {}
+      analyzeActive = false;
+      try {
+        if (analyzeOverlayEl) analyzeOverlayEl.style.display = 'none';
+      } catch {}
+
+      try {
+        isGatheringActiveThisTab = false;
+        stopGathering(false);
+        const s = getGatherState() || {};
+        s.isGathering = false;
+        delete s.refreshDeadline;
+        setGatherState(s);
+      } catch {}
+
+      teardownDetailBadge();
+      teardownControlBar();
+      stopObservers();
+
+      try {
+        if (dashboardInjectRafId) cancelAnimationFrame(dashboardInjectRafId);
+      } catch {}
+      dashboardInjectRafId = null;
+      try {
+        if (dashboardInjectRetryId) clearTimeout(dashboardInjectRetryId);
+      } catch {}
+      dashboardInjectRetryId = null;
+      try {
+        if (dashboardBtnEl && document.contains(dashboardBtnEl)) dashboardBtnEl.remove();
+      } catch {}
+      dashboardBtnEl = null;
+      return;
+    } else if (!observersActive) {
+      // If we previously disabled for /d/... and navigated back, resume observers.
+      startObservers();
+    }
 
     if (navigated) {
       forceStopGatherOnNavigation();
+      if (!shouldPreserveFilterAcrossNavigation(prev, rk)) resetFilterOnNavigation();
       // Reset bookmarks filter on navigation
       bookmarksFilterState = 0;
       lastAppliedFilterState = -1;
@@ -5795,8 +6648,7 @@ async function renderAnalyzeTable(force = false) {
       
       // Clear locks only if route truly changed; keep processed IDs for later skips
       lockedPostIds.clear();
-      processedPostDetailIds.clear();
-      dlog('feed', 'Navigation detected - cleared locked/processed post IDs');
+      dlog('feed', 'Navigation detected - cleared locked post IDs');
     }
 
     const bar = ensureControlBar();
@@ -5811,13 +6663,10 @@ async function renderAnalyzeTable(force = false) {
       }
     }
 
-    renderBadges();
-    renderDetailBadge();
-    renderProfileImpact();
-    renderBookmarkButtons();
-    renderDraftButtons();
-    updateControlsVisibility();
-    injectDashboardButton();
+    runRenderPass();
+
+    // SPA navigation can update the URL without a full re-render; always re-apply current filter.
+    applyFilter();
     
     // On post pages, retry rendering detail badge after a delay to allow DOM to settle
     if (isPost() && navigated) {
@@ -5858,9 +6707,10 @@ async function renderAnalyzeTable(force = false) {
     return true;
   }
 
-  const AUTO_UNLOAD_ROOT_MARGIN = '200px';
+  const AUTO_UNLOAD_ROOT_MARGIN = '600px'; // unload earlier for long scrolls
   let autoUnloadObserver = null;
   let autoUnloadObservedVideos = new WeakSet();
+  let autoUnloadObservedImages = new WeakSet();
 
   function ensureAutoUnloadObserver() {
     if (autoUnloadObserver) return autoUnloadObserver;
@@ -5870,6 +6720,7 @@ async function renderAnalyzeTable(force = false) {
       threshold: 0,
     });
     autoUnloadObservedVideos = new WeakSet();
+    autoUnloadObservedImages = new WeakSet();
     return autoUnloadObserver;
   }
 
@@ -5877,8 +6728,14 @@ async function renderAnalyzeTable(force = false) {
     if (!gatherAutoUnloadEnabled()) return;
     for (const entry of entries) {
       const video = entry.target;
-      if (entry.isIntersecting) reloadVideoElement(video);
-      else unloadVideoElement(video);
+      const tag = video.tagName;
+      if (tag === 'VIDEO') {
+        if (entry.isIntersecting) reloadVideoElement(video);
+        else unloadVideoElement(video);
+      } else if (tag === 'IMG') {
+        if (entry.isIntersecting) reloadImageElement(video);
+        else unloadImageElement(video);
+      }
     }
   }
 
@@ -5919,6 +6776,48 @@ async function renderAnalyzeTable(force = false) {
     }
   }
 
+  function unloadImageElement(img) {
+    if (img.dataset.soraUvImgUnloaded === '1') return;
+    try {
+      if (!img.dataset.soraUvImgSrc) {
+        const src = img.getAttribute('src');
+        if (src) img.dataset.soraUvImgSrc = src;
+      }
+      if (!img.dataset.soraUvImgSrcset) {
+        const srcset = img.getAttribute('srcset');
+        if (srcset) img.dataset.soraUvImgSrcset = srcset;
+      }
+      if (!img.dataset.soraUvImgSizes) {
+        const sizes = img.getAttribute('sizes');
+        if (sizes) img.dataset.soraUvImgSizes = sizes;
+      }
+      img.removeAttribute('srcset');
+      img.removeAttribute('sizes');
+      img.setAttribute('src', '');
+      img.dataset.soraUvImgUnloaded = '1';
+    } catch (err) {
+      console.warn('[SoraUV] failed to unload image', err);
+    }
+  }
+
+  function reloadImageElement(img) {
+    if (img.dataset.soraUvImgUnloaded !== '1') return;
+    try {
+      const src = img.dataset.soraUvImgSrc;
+      const srcset = img.dataset.soraUvImgSrcset;
+      const sizes = img.dataset.soraUvImgSizes;
+      if (src) img.setAttribute('src', src);
+      else img.removeAttribute('src');
+      if (srcset) img.setAttribute('srcset', srcset);
+      else img.removeAttribute('srcset');
+      if (sizes) img.setAttribute('sizes', sizes);
+      else img.removeAttribute('sizes');
+      delete img.dataset.soraUvImgUnloaded;
+    } catch (err) {
+      console.warn('[SoraUV] failed to reload image', err);
+    }
+  }
+
   function observeVideosForAutoUnload(card) {
     if (!gatherAutoUnloadEnabled()) return;
     const observer = ensureAutoUnloadObserver();
@@ -5927,6 +6826,12 @@ async function renderAnalyzeTable(force = false) {
       if (autoUnloadObservedVideos.has(video)) continue;
       observer.observe(video);
       autoUnloadObservedVideos.add(video);
+    }
+    const images = card.querySelectorAll('img');
+    for (const img of images) {
+      if (autoUnloadObservedImages.has(img)) continue;
+      observer.observe(img);
+      autoUnloadObservedImages.add(img);
     }
   }
 
@@ -5941,10 +6846,17 @@ async function renderAnalyzeTable(force = false) {
       autoUnloadObserver = null;
     }
     autoUnloadObservedVideos = new WeakSet();
+    autoUnloadObservedImages = new WeakSet();
     document.querySelectorAll('video[data-sora-uv-src], video[data-sora-uv-unloaded]').forEach((video) => {
       reloadVideoElement(video);
       delete video.dataset.soraUvSources;
       delete video.dataset.soraUvSrc;
+    });
+    document.querySelectorAll('img[data-sora-uv-img-unloaded], img[data-sora-uv-img-src], img[data-sora-uv-img-srcset], img[data-sora-uv-img-sizes]').forEach((img) => {
+      reloadImageElement(img);
+      delete img.dataset.soraUvImgSrc;
+      delete img.dataset.soraUvImgSrcset;
+      delete img.dataset.soraUvImgSizes;
     });
   }
 
@@ -6019,15 +6931,55 @@ async function renderAnalyzeTable(force = false) {
   }
 
   // Inject dashboard button into left sidebar
+  function scheduleDashboardInjectRetry(ms = 1000) {
+    if (dashboardInjectRetryId) return;
+    dashboardInjectRetryId = setTimeout(() => {
+      dashboardInjectRetryId = null;
+      scheduleInjectDashboardButton();
+    }, ms);
+  }
+
+  function isDashboardButtonPresent() {
+    try {
+      if (dashboardBtnEl && document.contains(dashboardBtnEl)) return true;
+      const existing = document.querySelector('.sora-uv-dashboard-btn');
+      if (existing) {
+        dashboardBtnEl = existing;
+        return true;
+      }
+    } catch {}
+    dashboardBtnEl = null;
+    return false;
+  }
+
+  function scheduleInjectDashboardButton() {
+    // Fast path: if we already hold a live reference, do nothing.
+    if (dashboardBtnEl && document.contains(dashboardBtnEl)) return;
+
+    const now = Date.now();
+    const since = now - dashboardInjectLastAttemptMs;
+    if (since < DASHBOARD_INJECT_THROTTLE_MS) {
+      scheduleDashboardInjectRetry(DASHBOARD_INJECT_THROTTLE_MS - since);
+      return;
+    }
+
+    if (dashboardInjectRafId) return;
+    dashboardInjectRafId = requestAnimationFrame(() => {
+      dashboardInjectRafId = null;
+      dashboardInjectLastAttemptMs = Date.now();
+      injectDashboardButton();
+    });
+  }
+
   function injectDashboardButton() {
     // Check if button already exists
-    if (document.querySelector('.sora-uv-dashboard-btn')) return;
+    if (isDashboardButtonPresent()) return;
 
     // Find the left sidebar - it has specific classes
     const sidebar = document.querySelector('div.fixed.left-0.top-0.z-50');
     if (!sidebar) {
       // Retry after a delay if sidebar not found yet
-      setTimeout(injectDashboardButton, 1000);
+      scheduleDashboardInjectRetry(1000);
       return;
     }
 
@@ -6036,7 +6988,7 @@ async function renderAnalyzeTable(force = false) {
     const notificationButton = buttons[buttons.length - 1]; // Get the last "Activity" button (notification bell)
     
     if (!notificationButton) {
-      setTimeout(injectDashboardButton, 1000);
+      scheduleDashboardInjectRetry(1000);
       return;
     }
 
@@ -6074,9 +7026,17 @@ async function renderAnalyzeTable(force = false) {
 
     // Insert before the notification button (above it)
     notificationButton.parentNode.insertBefore(dashboardBtn, notificationButton);
+
+    // Cache a stable reference; React may clone/replace later, but this avoids repeated document-wide lookups.
+    dashboardBtnEl = dashboardBtn;
+
+    if (dashboardInjectRetryId) {
+      clearTimeout(dashboardInjectRetryId);
+      dashboardInjectRetryId = null;
+    }
     
     try {
-      console.log('[SoraUV] Dashboard button injected into left sidebar');
+      dlog('feed', 'Dashboard button injected into left sidebar');
     } catch {}
   }
 
@@ -6131,6 +7091,10 @@ async function renderAnalyzeTable(force = false) {
   function init() {
     dlog('feed', 'init');
     ensureToastStyles();
+    if (isDraftDetail()) {
+      dlog('feed', 'draft detail route detected; not initializing');
+      return;
+    }
     // NOTE: we do NOT want to reset session here; we want Gather to survive a refresh.
     loadTaskToSourceDraft(); // Load task->draft mappings from localStorage
     installFetchSniffer();
@@ -6139,7 +7103,7 @@ async function renderAnalyzeTable(force = false) {
     window.addEventListener('storage', handleStorageChange);
 
     // Inject dashboard button into left sidebar
-    injectDashboardButton();
+    scheduleInjectDashboardButton();
 
     // Check for pending redo prompt (from remix navigation)
     checkPendingRedoPrompt();

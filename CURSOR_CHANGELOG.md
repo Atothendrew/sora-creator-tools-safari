@@ -1,6 +1,15 @@
 # CURSOR_CHANGELOG
 
+# 2025-12-22
+- Merged upstream `origin/main` into `ios`, pulling in the new `api.js` request/response hook and keeping `content.js`’s Safari `browser` → `chrome` shim while ensuring `inject.js` only runs outside draft detail pages.
+- Resolved CSS merge conflicts by combining the dashboard date-filter styling with upstream `.list-actions` active button/separator rules; retained prior dashboard styling.
+- Restored pre-merge local edits (dashboard/inject/notes) on top of the merged state. Merge remains uncommitted per repo policy.
+
 # CURSOR_CHANGELOG
+
+## 2025-12-10
+- Restored the dashboard CSV export flow to prefer `navigator.share` (with a File) before falling back to Blob downloads, fixing iOS/Safari extension export errors and documenting the behavior in `CLAUDE_PROJECT_KNOWLEDGE.md`.
+- Hardened gather-mode unloading for long profile scrolls: widened the IntersectionObserver margin and now unload/reload both videos and images (src/srcset/sizes) when they leave/enter the viewport to cut memory growth on thousand-card profiles.
 
 ## 2025-12-08
 - Rebasing `ios` onto the latest `main` replaced the previous merge attempt with a linear history; resolved README/`manifest.json`/`dashboard.js` conflicts so the Sorastats sponsor block coexists with the rebranded "Creator Tools for Sora" copy while preserving the Safari wrapper additions.

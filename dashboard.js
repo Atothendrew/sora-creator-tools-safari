@@ -4,7 +4,11 @@
 
   const $ = (sel, el=document) => el.querySelector(sel);
   const $$ = (sel, el=document) => Array.from(el.querySelectorAll(sel));
-  const SITE_ORIGIN = 'https://sora.chatgpt.com';
+  const TOP_TODAY_KEY = '__top_today__';
+  const TOP_TODAY_WINDOW_MS = 24 * 60 * 60 * 1000;
+  const TOP_TODAY_MIN_UNIQUE_VIEWS = 100;
+    const TOP_TODAY_MIN_LIKES = 15;
+    const SITE_ORIGIN = 'https://sora.chatgpt.com';
   const absUrl = (u, pid) => {
     if (!u && pid) return `${SITE_ORIGIN}/p/${pid}`;
     if (!u) return null;
@@ -132,6 +136,13 @@
     return 0;
   }
 
+  function lastRefreshMsForPost(post){
+    const last = latestSnapshot(post?.snapshots);
+    const snapT = toTs(last?.t) || 0;
+    const seenT = toTs(post?.lastSeen) || 0;
+    return Math.max(snapT, seenT);
+  }
+
   // Timestamp helpers
   function toTs(v){
     if (typeof v === 'number' && isFinite(v)){
@@ -167,6 +178,53 @@
       if (t) return t;
     }
     return 0; // unknown -> sort to bottom
+  }
+  // Loose post time lookup for recency filters: allow snapshot-time fallback
+  function getPostTimeForRecency(p){
+    const strict = getPostTimeStrict(p);
+    if (strict) return strict;
+    const snaps = Array.isArray(p?.snapshots) ? p.snapshots : [];
+    let best = Infinity;
+    for (const s of snaps){
+      const t = toTs(s?.t);
+      if (t && t < best) best = t;
+    }
+    return best < Infinity ? best : 0;
+  }
+  function isTopTodayKey(k){ return k === TOP_TODAY_KEY; }
+  function buildTopTodayUser(metrics){
+    const now = Date.now();
+    const cutoff = now - TOP_TODAY_WINDOW_MS;
+    const posts = {};
+    for (const [userKey, user] of Object.entries(metrics?.users || {})){
+      for (const [pid, p] of Object.entries(user?.posts || {})){
+        const t = getPostTimeForRecency(p);
+        if (!t || t < cutoff) continue;
+
+        // Threshold filter for "Top Today": require some minimum engagement.
+        const last = latestSnapshot(p?.snapshots);
+        const uv = num(last?.uv);
+        const likes = num(last?.likes);
+        if (uv < TOP_TODAY_MIN_UNIQUE_VIEWS) continue;
+        if (likes < TOP_TODAY_MIN_LIKES) continue;
+
+        // Prefer the entry with more snapshots if we see duplicates
+        const existing = posts[pid];
+        if (existing){
+          const a = Array.isArray(existing.snapshots) ? existing.snapshots.length : 0;
+          const b = Array.isArray(p.snapshots) ? p.snapshots.length : 0;
+          if (b <= a) continue;
+        }
+        // Avoid mutating stored data; ensure ownerHandle is present for labeling.
+        const ownerHandle = p?.ownerHandle || user?.handle || (userKey.startsWith('h:') ? userKey.slice(2) : '') || null;
+        posts[pid] = ownerHandle && !p?.ownerHandle ? { ...p, ownerHandle } : p;
+      }
+    }
+    return { handle: 'Top Today', id: null, posts, followers: [], cameos: [], __specialKey: TOP_TODAY_KEY };
+  }
+  function resolveUserForKey(metrics, userKey){
+    if (isTopTodayKey(userKey)) return buildTopTodayUser(metrics);
+    return metrics?.users?.[userKey] || null;
   }
   const DBG_SORT = false; // hide noisy sorting logs by default
 
@@ -332,6 +390,16 @@
   function buildUserOptions(metrics){
     const sel = $('#userSelect');
     sel.innerHTML = '';
+
+    // "Top Today" virtual option (last 24h across all users)
+    {
+      const topToday = buildTopTodayUser(metrics);
+      const opt = document.createElement('option');
+      opt.value = TOP_TODAY_KEY;
+      opt.textContent = `${topToday.handle} (${Object.keys(topToday.posts||{}).length})`;
+      sel.appendChild(opt);
+    }
+
     let entries = Object.entries(metrics.users);
     // Sort by post count (most to least), pushing 'unknown' to the end
     const users = entries.sort((a,b)=>{
@@ -377,7 +445,7 @@
   function buildPostLabel(post, userHandle) {
     const cap = (typeof post?.caption === 'string' && post.caption) ? post.caption.trim() : null;
     const cameos = Array.isArray(post?.cameo_usernames) ? post.cameo_usernames.filter(c => typeof c === 'string' && c.trim()) : [];
-    const owner = userHandle || '';
+    const owner = userHandle || post?.ownerHandle || '';
     const captionText = cap || post.id || '';
     
     if (owner && cameos.length > 0) {
@@ -400,17 +468,21 @@
     const wrap = $('#posts');
     wrap.innerHTML='';
     if (!user) return;
+    const isTopToday = user?.__specialKey === TOP_TODAY_KEY;
     // Build and sort: known-dated posts first (newest → oldest), undated go to bottom
     const mapped = Object.entries(user.posts||{}).map(([pid,p])=>{
       const last = latestSnapshot(p.snapshots) || {};
       const first = p.snapshots?.[0] || {};
       const rawPT = p?.post_time ?? p?.postTime ?? p?.post?.post_time ?? p?.post?.postTime ?? p?.meta?.post_time ?? null;
-      const postTime = getPostTimeStrict(p) || 0;
+      const postTime = (isTopToday ? (getPostTimeStrict(p) || getPostTimeForRecency(p)) : getPostTimeStrict(p)) || 0;
       const rate = interactionRate(last);
       const bi = pidBigInt(pid);
+      const views = num(last?.views);
+      const likes = num(last?.likes);
+      const lastSeen = p?.lastSeen || 0;
       const cap = (typeof p?.caption === 'string' && p.caption) ? p.caption.trim() : null;
       const cameos = Array.isArray(p?.cameo_usernames) ? p.cameo_usernames.filter(c => typeof c === 'string' && c.trim()) : [];
-      const owner = user?.handle || '';
+      const owner = user?.__specialKey === TOP_TODAY_KEY ? (p?.ownerHandle || '') : (user?.handle || '');
       
       // Build label with cameo info: "owner cameoed cameo1, cameo2 - caption"
       let label, title;
@@ -427,10 +499,7 @@
         title = captionText;
       }
       
-      if (DBG_SORT){
-        try { console.log(`[Dashboard] sort pid=${pid} raw=${rawPT} norm=${postTime} pidBI=${bi.toString()}`); } catch {}
-      }
-      return { pid, url: absUrl(p.url, pid), thumb: p.thumb, label, title, last, first, postTime, pidBI: bi, rate, cameos, owner, caption: cap };
+      return { pid, url: absUrl(p.url, pid), thumb: p.thumb, label, title, last, first, postTime, pidBI: bi, rate, cameos, owner, caption: cap, views, likes, lastSeen };
     });
     // Sort newest first assuming larger post_time is newer
     const withTs = mapped.filter(x=>x.postTime>0).sort((a,b)=>b.postTime - a.postTime);
@@ -439,6 +508,85 @@
       return a.pidBI < b.pidBI ? 1 : -1; // descending: bigger id => newer first
     });
     const posts = withTs.concat(noTs);
+
+    // If a list-action filter is active, surface selected posts to top.
+    let orderedPosts = posts;
+    const activeActionId = opts.activeActionId || null;
+    if (activeActionId && visibleSet && visibleSet.size > 0) {
+      const pidToPost = new Map(posts.map(p=>[p.pid, p]));
+      const bottomComparator = (a,b)=>{
+        const dl = (a.likes - b.likes);
+        if (dl !== 0) return dl;
+        const dv = a.views - b.views;
+        if (dv !== 0) return dv;
+        const dt = (a.postTime || 0) - (b.postTime || 0);
+        if (dt !== 0) return dt;
+        if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+        return a.pidBI < b.pidBI ? -1 : 1;
+      };
+      const topComparator = (a,b)=>{
+        const dl = (b.likes - a.likes);
+        if (dl !== 0) return dl;
+        const dv = b.views - a.views;
+        if (dv !== 0) return dv;
+        const dt = (b.postTime || 0) - (a.postTime || 0);
+        if (dt !== 0) return dt;
+        if (a.pidBI === b.pidBI) return b.pid.localeCompare(a.pid);
+        return a.pidBI < b.pidBI ? 1 : -1;
+      };
+
+      let selectedOrdered = [];
+      if (activeActionId === 'top5' || activeActionId === 'top10') {
+        selectedOrdered = posts.filter(p=>visibleSet.has(p.pid)).slice().sort(topComparator);
+      } else if (activeActionId === 'bottom5' || activeActionId === 'bottom10') {
+        if (isTopToday) {
+          selectedOrdered = posts.filter(p=>visibleSet.has(p.pid)).slice().sort(bottomComparator);
+        } else {
+          const now = Date.now();
+          const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+          const withAge = posts.map(p=>({ ...p, ageMs: p.postTime ? now - p.postTime : Infinity }));
+          const olderThan24h = withAge.filter(x=>x.ageMs > TWENTY_FOUR_HOURS_MS).sort(bottomComparator);
+          const allSorted = withAge.slice().sort(bottomComparator);
+          for (const it of olderThan24h) {
+            if (visibleSet.has(it.pid)) selectedOrdered.push(pidToPost.get(it.pid));
+          }
+          for (const it of allSorted) {
+            if (visibleSet.has(it.pid) && !selectedOrdered.find(p=>p.pid===it.pid)) {
+              selectedOrdered.push(pidToPost.get(it.pid));
+            }
+          }
+        }
+      } else if (activeActionId === 'stale') {
+        const now = Date.now();
+        const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+        selectedOrdered = posts
+          .filter(p=>visibleSet.has(p.pid))
+          .slice()
+          .sort((a,b)=>{
+            const at = Math.max(toTs(a.last?.t) || 0, toTs(a.lastSeen) || 0);
+            const bt = Math.max(toTs(b.last?.t) || 0, toTs(b.lastSeen) || 0);
+            const aAge = at ? now - at : Infinity;
+            const bAge = bt ? now - bt : Infinity;
+            const dAge = bAge - aAge; // most stale first
+            if (dAge !== 0) return dAge;
+            return bottomComparator(a,b);
+          })
+          .filter(p=>{
+            const t = Math.max(toTs(p.last?.t) || 0, toTs(p.lastSeen) || 0);
+            const ageMs = t ? now - t : Infinity;
+            return ageMs > TWENTY_FOUR_HOURS_MS;
+          });
+      } else {
+        // last5/last10 or other actions: keep default newest-first order.
+        selectedOrdered = posts.filter(p=>visibleSet.has(p.pid));
+      }
+
+      const unselected = posts.filter(p=>!visibleSet.has(p.pid));
+      orderedPosts = [];
+      orderedPosts.push(...selectedOrdered);
+      if (selectedOrdered.length && unselected.length) orderedPosts.push({ __separator: true });
+      orderedPosts.push(...unselected);
+    }
 
     // Update metric cards (sum of latest values for visible posts)
     try{
@@ -481,8 +629,14 @@
       }
     } catch {}
 
-    for (let i=0;i<posts.length;i++){
-      const p = posts[i];
+    for (let i=0;i<orderedPosts.length;i++){
+      const p = orderedPosts[i];
+      if (p && p.__separator) {
+        const sep = document.createElement('div');
+        sep.className = 'posts-separator';
+        wrap.appendChild(sep);
+        continue;
+      }
       const row = document.createElement('div');
       row.className='post';
       row.dataset.pid = p.pid;
@@ -664,7 +818,8 @@
         if (viewValue != null && r != null) pts.push({ x:viewValue, y:r, t:s.t });
       }
       const color = typeof colorFor === 'function' ? colorFor(pid) : COLORS[i % COLORS.length];
-      const label = buildPostLabel({ ...p, id: pid }, user?.handle);
+      const owner = user?.__specialKey === TOP_TODAY_KEY ? (p?.ownerHandle || '') : (user?.handle || '');
+      const label = buildPostLabel({ ...p, id: pid }, owner);
       if (pts.length) series.push({ id: pid, label, color, points: pts, highlighted: selectedPIDs.includes(pid) });
     }
     return series;
@@ -2557,14 +2712,46 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         ].map(escapeCSV).join(','));
       }
       
-      // Create and download CSV
+      // Create CSV content once
       const csvContent = allLines.join('\n');
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+      const filename = `sora_all_data_export_${timestamp}.csv`;
+
+      // Prefer the system share sheet on platforms (notably iOS Safari) where
+      // downloads initiated from extension pages are unreliable.
+      const shareFile = (() => {
+        try {
+          if (typeof File === 'undefined') return null;
+          return new File([csvContent], filename, { type: 'text/csv' });
+        } catch {
+          return null;
+        }
+      })();
+
+      if (shareFile && typeof navigator !== 'undefined' && navigator.share) {
+        const canShareFiles = typeof navigator.canShare === 'function'
+          ? navigator.canShare({ files: [shareFile] })
+          : true;
+        if (canShareFiles) {
+          try {
+            await navigator.share({
+              files: [shareFile],
+              title: 'Creator Tools data export',
+              text: 'CSV export from Creator Tools for Sora'
+            });
+            return;
+          } catch (shareErr) {
+            console.warn('[Dashboard] Share failed, falling back to download', shareErr);
+          }
+        }
+      }
+
+      // Fallback to direct blob download for desktop browsers
       const blob = new Blob([csvContent], {type:'text/csv;charset=utf-8;'});
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-      a.download = `sora_all_data_export_${timestamp}.csv`;
+      a.download = filename;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -2960,7 +3147,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     let currentUserKey = buildUserOptions(metrics);
     try {
       const { lastUserKey } = await chrome.storage.local.get('lastUserKey');
-      if (lastUserKey && metrics.users[lastUserKey]) currentUserKey = lastUserKey;
+      if (lastUserKey && (metrics.users[lastUserKey] || isTopTodayKey(lastUserKey))) currentUserKey = lastUserKey;
     } catch {}
     const selEl = $('#userSelect'); if (currentUserKey) selEl.value = currentUserKey;
     let viewsChartType = 'unique'; // 'unique' or 'total'
@@ -2973,23 +3160,188 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     let allViewsChart = makeTimeChart($('#allViewsChart'), '#allViewsTooltip', 'Total Views', fmt2);
     const allLikesChart = makeTimeChart($('#allLikesChart'), '#allLikesTooltip', 'Likes', fmt2);
     const cameosChart = makeTimeChart($('#cameosChart'), '#cameosTooltip', 'Cast in', fmt2);
+    const PRESET_VISIBILITY_ACTIONS = new Set(['last5','last10','top5','top10','bottom5','bottom10','stale']);
     // Load persisted zoom states
     let zoomStates = {};
     try { const st = await chrome.storage.local.get('zoomStates'); zoomStates = st.zoomStates || {}; } catch {}
     const visibleSet = new Set();
     let visibilityByUser = {};
+    const sessionVisibilityByUser = (function(){
+      try { return JSON.parse(sessionStorage.getItem('visibilityByUserSession') || '{}'); } catch { return {}; }
+    })();
     try {
       const st = await chrome.storage.local.get('visibilityByUser');
-      visibilityByUser = st.visibilityByUser || {};
+      visibilityByUser = (function(raw){
+        const out = {};
+        if (!raw || typeof raw !== 'object') return out;
+        for (const [userKey, entry] of Object.entries(raw)){
+          if (Array.isArray(entry)) out[userKey] = { ids: entry, source: 'legacy' };
+          else if (entry && typeof entry === 'object'){
+            const ids = Array.isArray(entry.ids) ? entry.ids : [];
+            const source = typeof entry.source === 'string' ? entry.source : 'legacy';
+            out[userKey] = { ids, source };
+          }
+        }
+        return out;
+      })(st.visibilityByUser);
     } catch {}
+    let listActionByUser = (function(){
+      try { return JSON.parse(sessionStorage.getItem('listActionByUserSession') || '{}'); } catch { return {}; }
+    })();
+    function persistListActionForUser(userKey, actionId){
+      if (!userKey) return;
+      if (actionId) listActionByUser[userKey] = actionId;
+      else delete listActionByUser[userKey];
+      try { sessionStorage.setItem('listActionByUserSession', JSON.stringify(listActionByUser)); } catch {}
+    }
+    let currentVisibilitySource = 'showAll';
     let pendingPostPurge = null;
+    let currentListActionId = null;
     
     // Compare users state
     const compareUsers = new Set();
     const MAX_COMPARE_USERS = 10;
 
+    function getSavedVisibilityEntry(userKey){
+      const entry = sessionVisibilityByUser?.[userKey] || visibilityByUser?.[userKey];
+      if (!entry) return null;
+      const ids = Array.isArray(entry.ids) ? entry.ids : [];
+      const source = typeof entry.source === 'string' ? entry.source : 'legacy';
+      const out = { ids, source };
+      if (sessionVisibilityByUser?.[userKey]) out.__fromSession = true;
+      return out;
+    }
+    function isPresetVisibilitySource(source){
+      return PRESET_VISIBILITY_ACTIONS.has(source);
+    }
+    function isDefaultVisibilitySource(source){
+      if (!source || source === 'showAll' || source === 'hideAll') return true;
+      if (source === 'legacy') return true;
+      return isPresetVisibilitySource(source);
+    }
+    function buildPresetIds(action, user){
+      if (!user) return [];
+      const isTopToday = user?.__specialKey === TOP_TODAY_KEY;
+      if (action === 'last5' || action === 'last10'){
+        const mapped = Object.entries(user.posts||{}).map(([pid,p])=>({
+          pid,
+          postTime: (isTopToday ? (getPostTimeStrict(p) || getPostTimeForRecency(p)) : getPostTimeStrict(p)) || 0,
+          pidBI: pidBigInt(pid)
+        }));
+        const withTs = mapped.filter(x=>x.postTime>0).sort((a,b)=>b.postTime - a.postTime);
+        const noTs = mapped.filter(x=>x.postTime<=0).sort((a,b)=>{
+          if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+          return a.pidBI < b.pidBI ? 1 : -1;
+        });
+        const sorted = withTs.concat(noTs);
+        return sorted.slice(0, action === 'last5' ? 5 : 10).map(it=>it.pid);
+      }
+      if (action === 'top5' || action === 'top10'){
+        const mapped = Object.entries(user.posts||{}).map(([pid,p])=>{
+          const last = latestSnapshot(p.snapshots);
+          return {
+            pid,
+            views: num(last?.views),
+            likes: num(last?.likes),
+            postTime: getPostTimeStrict(p) || 0,
+            pidBI: pidBigInt(pid)
+          };
+        });
+        const sorted = mapped.sort((a,b)=>{
+          const dl = b.likes - a.likes;
+          if (dl !== 0) return dl;
+          const dv = b.views - a.views;
+          if (dv !== 0) return dv;
+          const dt = (b.postTime || 0) - (a.postTime || 0);
+          if (dt !== 0) return dt;
+          if (a.pidBI === b.pidBI) return b.pid.localeCompare(a.pid);
+          return a.pidBI < b.pidBI ? 1 : -1;
+        });
+        return sorted.slice(0, action === 'top5' ? 5 : 10).map(it=>it.pid);
+      }
+      if (action === 'bottom5' || action === 'bottom10'){
+        const now = Date.now();
+        const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+        const mapped = Object.entries(user.posts||{}).map(([pid,p])=>{
+          const postTime = (isTopToday ? (getPostTimeStrict(p) || getPostTimeForRecency(p)) : getPostTimeStrict(p)) || 0;
+          const ageMs = postTime ? now - postTime : Infinity;
+          const last = latestSnapshot(p.snapshots);
+          return {
+            pid,
+            postTime,
+            views: num(last?.views),
+            likes: num(last?.likes),
+            ageMs,
+            pidBI: pidBigInt(pid)
+          };
+        });
+        const bottomComparator = (a,b)=>{
+          const dl = a.likes - b.likes;
+          if (dl !== 0) return dl;
+          const dv = a.views - b.views;
+          if (dv !== 0) return dv;
+          const dt = (a.postTime || 0) - (b.postTime || 0);
+          if (dt !== 0) return dt;
+          if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+          return a.pidBI < b.pidBI ? -1 : 1;
+        };
+        const picked = (function(){
+          if (isTopToday){
+            const sorted = mapped.slice().sort(bottomComparator);
+            return sorted.slice(0, action === 'bottom5' ? 5 : 10);
+          }
+          const olderThan24h = mapped.filter(x=>x.ageMs > TWENTY_FOUR_HOURS_MS);
+          const sortedOlder = olderThan24h.sort(bottomComparator);
+          const sortedAll = mapped.slice().sort(bottomComparator);
+          const need = action === 'bottom5' ? 5 : 10;
+          const out = [];
+          for (const it of sortedOlder){
+            if (out.length >= need) break;
+            out.push(it);
+          }
+          if (out.length < need){
+            const seen = new Set(out.map(p=>p.pid));
+            for (const it of sortedAll){
+              if (out.length >= need) break;
+              if (seen.has(it.pid)) continue;
+              out.push(it);
+            }
+          }
+          return out;
+        })();
+        return picked.map(it=>it.pid);
+      }
+      if (action === 'stale'){
+        const now = Date.now();
+        const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+        const stale = Object.entries(user.posts||{}).map(([pid,p])=>{
+          const lastRefresh = lastRefreshMsForPost(p);
+          const ageMs = lastRefresh ? now - lastRefresh : Infinity;
+          return { pid, ageMs };
+        }).filter(x=>x.ageMs > TWENTY_FOUR_HOURS_MS);
+        return stale.map(it=>it.pid);
+      }
+      return [];
+    }
+    function isLegacyDefaultVisibility(user, ids){
+      if (!user) return false;
+      const idsSet = new Set((ids||[]).filter(Boolean));
+      const allPids = Object.keys(user.posts||{});
+      if (idsSet.size === 0) return true; // Hide all legacy state
+      if (idsSet.size === allPids.length && allPids.every(pid=>idsSet.has(pid))) return true; // Show all legacy state
+      for (const action of PRESET_VISIBILITY_ACTIONS){
+        const presetIds = buildPresetIds(action, user);
+        if (!presetIds.length) continue;
+        if (presetIds.length === idsSet.size && presetIds.every(pid=>idsSet.has(pid))) return true;
+      }
+      return false;
+    }
     function persistVisibility(){
-      visibilityByUser[currentUserKey] = Array.from(visibleSet);
+      if (isTopTodayKey(currentUserKey)) return;
+      const source = currentVisibilitySource || currentListActionId || 'custom';
+      const payload = { ids: Array.from(visibleSet), source };
+      visibilityByUser[currentUserKey] = payload;
+      try { sessionVisibilityByUser[currentUserKey] = payload; sessionStorage.setItem('visibilityByUserSession', JSON.stringify(sessionVisibilityByUser)); } catch {}
       try { chrome.storage.local.set({ visibilityByUser }); } catch {}
     }
 
@@ -2999,8 +3351,8 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       container.innerHTML = '';
       const users = Array.from(compareUsers);
       users.forEach((userKey, idx)=>{
-        const user = metrics.users[userKey];
-        const handle = user?.handle || userKey;
+        const user = resolveUserForKey(metrics, userKey);
+        const handle = user?.handle || (isTopTodayKey(userKey) ? 'Top Today' : userKey);
         const color = COLORS[idx % COLORS.length];
         const pill = document.createElement('div');
         pill.className = 'compare-pill';
@@ -3022,7 +3374,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           e.stopPropagation();
           compareUsers.delete(userKey);
           // If compare section becomes empty, add current user to show who we're looking at
-          if (compareUsers.size === 0 && currentUserKey && metrics.users[currentUserKey]){
+          if (compareUsers.size === 0 && currentUserKey && resolveUserForKey(metrics, currentUserKey)){
             addCompareUser(currentUserKey);
           } else {
             renderComparePills();
@@ -3050,7 +3402,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
 
     function addCompareUser(userKey){
       if (compareUsers.size >= MAX_COMPARE_USERS) return;
-      if (!metrics.users[userKey]) return;
+      if (!resolveUserForKey(metrics, userKey)) return;
       if (compareUsers.has(userKey)) return;
       compareUsers.add(userKey);
       renderComparePills();
@@ -3072,7 +3424,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         const useUnique = compareViewsChartType === 'unique';
         const allSeries = [];
         userKeys.forEach((userKey, idx)=>{
-          const user = metrics.users[userKey];
+          const user = resolveUserForKey(metrics, userKey);
           if (!user) return;
           const pts = (function(){
             const events = [];
@@ -3099,10 +3451,13 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           })();
           if (pts.length){
             const color = COLORS[idx % COLORS.length];
-            const handle = user.handle || userKey;
+            const handle = user.handle || (isTopTodayKey(userKey) ? 'Top Today' : userKey);
             const profileUrl = handle ? `${SITE_ORIGIN}/profile/${handle}` : null;
-            const label = useUnique ? `@${handle}'s Unique Views` : `@${handle}'s Total Views`;
-            allSeries.push({ id: userKey, label, color, points: pts, profileUrl });
+            const isTopToday = isTopTodayKey(userKey);
+            const label = isTopToday
+              ? (useUnique ? 'Top Today • Unique Views' : 'Top Today • Total Views')
+              : (useUnique ? `@${handle}'s Unique Views` : `@${handle}'s Total Views`);
+            allSeries.push({ id: userKey, label, color, points: pts, profileUrl: isTopToday ? null : profileUrl });
           }
         });
         const yAxisLabel = useUnique ? 'Unique Views' : 'Total Views';
@@ -3114,7 +3469,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       try {
         const allSeries = [];
         userKeys.forEach((userKey, idx)=>{
-          const user = metrics.users[userKey];
+          const user = resolveUserForKey(metrics, userKey);
           if (!user) return;
           const ptsLikes = (function(){
             const events = [];
@@ -3140,9 +3495,10 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           })();
           if (ptsLikes.length){
             const color = COLORS[idx % COLORS.length];
-            const handle = user.handle || userKey;
+            const handle = user.handle || (isTopTodayKey(userKey) ? 'Top Today' : userKey);
             const profileUrl = handle ? `${SITE_ORIGIN}/profile/${handle}` : null;
-            allSeries.push({ id: userKey, label: `@${handle}'s Likes`, color, points: ptsLikes, profileUrl });
+            const isTopToday = isTopTodayKey(userKey);
+            allSeries.push({ id: userKey, label: isTopToday ? 'Top Today • Likes' : `@${handle}'s Likes`, color, points: ptsLikes, profileUrl: isTopToday ? null : profileUrl });
           }
         });
         allLikesChart.setData(allSeries);
@@ -3152,15 +3508,16 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       try {
         const allSeries = [];
         userKeys.forEach((userKey, idx)=>{
-          const user = metrics.users[userKey];
+          const user = resolveUserForKey(metrics, userKey);
           if (!user) return;
           const arr = Array.isArray(user.cameos) ? user.cameos : [];
           const pts = arr.map(it=>({ x:Number(it.t), y:Number(it.count), t:Number(it.t) })).filter(p=>isFinite(p.x)&&isFinite(p.y));
           if (pts.length){
             const color = COLORS[idx % COLORS.length];
-            const handle = user.handle || userKey;
+            const handle = user.handle || (isTopTodayKey(userKey) ? 'Top Today' : userKey);
             const profileUrl = handle ? `${SITE_ORIGIN}/profile/${handle}` : null;
-            allSeries.push({ id: userKey, label: `@${handle}'s Cast in`, color, points: pts, profileUrl });
+            const isTopToday = isTopTodayKey(userKey);
+            allSeries.push({ id: userKey, label: isTopToday ? 'Top Today • Cast in' : `@${handle}'s Cast in`, color, points: pts, profileUrl: isTopToday ? null : profileUrl });
           }
         });
         cameosChart.setData(allSeries);
@@ -3170,15 +3527,16 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       try {
         const allSeries = [];
         userKeys.forEach((userKey, idx)=>{
-          const user = metrics.users[userKey];
+          const user = resolveUserForKey(metrics, userKey);
           if (!user) return;
           const arr = Array.isArray(user.followers) ? user.followers : [];
           const pts = arr.map(it=>({ x:Number(it.t), y:Number(it.count), t:Number(it.t) })).filter(p=>isFinite(p.x)&&isFinite(p.y));
           if (pts.length){
             const color = COLORS[idx % COLORS.length];
-            const handle = user.handle || userKey;
+            const handle = user.handle || (isTopTodayKey(userKey) ? 'Top Today' : userKey);
             const profileUrl = handle ? `${SITE_ORIGIN}/profile/${handle}` : null;
-            allSeries.push({ id: userKey, label: `@${handle}'s Followers`, color, points: pts, profileUrl });
+            const isTopToday = isTopTodayKey(userKey);
+            allSeries.push({ id: userKey, label: isTopToday ? 'Top Today • Followers' : `@${handle}'s Followers`, color, points: pts, profileUrl: isTopToday ? null : profileUrl });
           }
         });
         followersChart.setData(allSeries);
@@ -3186,7 +3544,31 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
 
       // Update metric cards with aggregated totals across all compared users
       try {
-        const totals = computeTotalsForUsers(userKeys, metrics);
+        const totals = (function(){
+          const res = { views:0, uniqueViews:0, likes:0, replies:0, remixes:0, interactions:0, cameos:0, followers:0 };
+          for (const userKey of userKeys){
+            const user = resolveUserForKey(metrics, userKey);
+            if (!user) continue;
+            const userTotals = computeTotalsForUser(user);
+            res.views += userTotals.views;
+            res.uniqueViews += userTotals.uniqueViews;
+            res.likes += userTotals.likes;
+            res.replies += userTotals.replies;
+            res.remixes += userTotals.remixes;
+            res.interactions += userTotals.interactions;
+            const cameosArr = Array.isArray(user.cameos) ? user.cameos : [];
+            if (cameosArr.length > 0){
+              const lastCameo = cameosArr[cameosArr.length - 1];
+              res.cameos += num(lastCameo?.count);
+            }
+            const followersArr = Array.isArray(user.followers) ? user.followers : [];
+            if (followersArr.length > 0){
+              const lastFollower = followersArr[followersArr.length - 1];
+              res.followers += num(lastFollower?.count);
+            }
+          }
+          return res;
+        })();
         const allTotalViewsEl = $('#allTotalViewsTotal'); if (allTotalViewsEl) allTotalViewsEl.textContent = fmt2(totals.views);
         const allUniqueViewsEl = $('#allUniqueViewsTotal'); if (allUniqueViewsEl) allUniqueViewsEl.textContent = fmt2(totals.uniqueViews);
         const allLikesEl = $('#allLikesTotal'); if (allLikesEl) allLikesEl.textContent = fmt2(totals.likes);
@@ -3842,21 +4224,22 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
 
     // Function to update first 24 hours chart
     function updateFirst24HoursChart(timeWindowMinutes){
-      const user = metrics.users[currentUserKey];
+      const user = resolveUserForKey(metrics, currentUserKey);
       if (!user) return;
       const colorFor = makeColorMap(user);
       const useUnique = viewsChartType === 'unique';
       const f24Series = (function(){
         const out=[]; for (const [pid,p] of Object.entries(user.posts||{})){
           if (!visibleSet.has(pid)) continue;
-          const postTime = getPostTimeStrict(p);
-          if (!postTime) continue; // Skip posts without creation time (can't calculate time since creation)
+          const postTime = getPostTimeStrict(p) || getPostTimeForRecency(p);
+          if (!postTime) continue; // Skip posts without any time reference
           const pts=[]; for (const s of (p.snapshots||[])){ 
             const t=s.t; 
             const v=useUnique ? s.uv : s.views; 
             if (t!=null && v!=null) pts.push({ x:Number(t), y:Number(v), t:Number(t) }); 
           }
-          const color=colorFor(pid); const label = buildPostLabel({ ...p, id: pid }, user?.handle);
+          const owner = user?.__specialKey === TOP_TODAY_KEY ? (p?.ownerHandle || '') : (user?.handle || '');
+          const color=colorFor(pid); const label = buildPostLabel({ ...p, id: pid }, owner);
           // Include all posts with post_time, even if they have no snapshots or no snapshots in the time window
           out.push({ id: pid, label, color, points: pts, url: absUrl(p.url, pid), postTime: postTime }); }
         return out; })();
@@ -3872,14 +4255,14 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     }
 
     function updateViewsPerPersonChart(timeWindowMinutes){
-      const user = metrics.users[currentUserKey];
+      const user = resolveUserForKey(metrics, currentUserKey);
       if (!user) return;
       const colorFor = makeColorMap(user);
       const vppSeries = (function(){
         const out=[]; for (const [pid,p] of Object.entries(user.posts||{})){
           if (!visibleSet.has(pid)) continue;
-          const postTime = getPostTimeStrict(p);
-          if (!postTime) continue; // Skip posts without creation time (can't calculate time since creation)
+          const postTime = getPostTimeStrict(p) || getPostTimeForRecency(p);
+          if (!postTime) continue; // Skip posts without any time reference
           const pts=[]; for (const s of (p.snapshots||[])){ 
             const t=s.t; 
             const totalViews = num(s.views);
@@ -3890,49 +4273,85 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
               pts.push({ x:Number(t), y:vpp, t:Number(t) }); 
             }
           }
-          const color=colorFor(pid); const label = buildPostLabel({ ...p, id: pid }, user?.handle);
+          const owner = user?.__specialKey === TOP_TODAY_KEY ? (p?.ownerHandle || '') : (user?.handle || '');
+          const color=colorFor(pid); const label = buildPostLabel({ ...p, id: pid }, owner);
           // Include all posts with post_time, even if they have no snapshots or no snapshots in the time window
           out.push({ id: pid, label, color, points: pts, url: absUrl(p.url, pid), postTime: postTime }); }
         return out; })();
       viewsPerPersonChart.setData(vppSeries, timeWindowMinutes);
     }
 
-    async function refreshUserUI(opts={}){
-      const { preserveEmpty=false, skipRestoreZoom=false } = opts;
-      const user = metrics.users[currentUserKey];
-      if (!user){
-        buildPostsList(null, ()=>COLORS[0], new Set()); chart.setData([]); return;
-      }
+	    async function refreshUserUI(opts={}){
+	      const { preserveEmpty=false, skipRestoreZoom=false } = opts;
+	      const user = resolveUserForKey(metrics, currentUserKey);
+	      if (!user){
+          setListActionActive('showAll');
+          currentVisibilitySource = 'showAll';
+	        buildPostsList(null, ()=>COLORS[0], new Set()); chart.setData([]); return;
+	      }
       // No precompute needed for IR; use latest available remix count only for cards
       // Integrity check: remove posts incorrectly attributed to this user
       // Reconcile ownership (selected user only), then reclaim, then remove empty posts
-      await pruneMismatchedPostsForUser(metrics, currentUserKey);
-      await reclaimFromUnknownForUser(metrics, currentUserKey);
-      await pruneEmptyPostsForUser(metrics, currentUserKey);
-      const colorFor = makeColorMap(user);
-      if (visibleSet.size === 0 && !preserveEmpty){
-        // Restore from saved state (including empty) or default to last 20 most recent posts when no saved state
-        if (Object.prototype.hasOwnProperty.call(visibilityByUser, currentUserKey)){
-          const saved = visibilityByUser[currentUserKey];
-          if (Array.isArray(saved)) saved.forEach(pid=>visibleSet.add(pid));
-        } else {
-          // Only include posts with a valid post_time when choosing the default 20
-          const dated = Object.entries(user.posts||{})
-            .map(([pid,p])=>({ pid, t: getPostTimeStrict(p) || 0 }))
-            .filter(it=>it.t>0)
-            .sort((a,b)=>b.t-a.t);
-          if (dated.length){
-            dated.slice(0,20).forEach(it=>visibleSet.add(it.pid));
+      if (!isTopTodayKey(currentUserKey)){
+        await pruneMismatchedPostsForUser(metrics, currentUserKey);
+        await reclaimFromUnknownForUser(metrics, currentUserKey);
+        await pruneEmptyPostsForUser(metrics, currentUserKey);
+      }
+	      const colorFor = makeColorMap(user);
+        const isTopToday = isTopTodayKey(currentUserKey);
+        const savedVisibility = getSavedVisibilityEntry(currentUserKey);
+        let effectiveSaved = savedVisibility;
+        if (savedVisibility && savedVisibility.source === 'legacy'){
+          if (isLegacyDefaultVisibility(user, savedVisibility.ids)){
+            effectiveSaved = null;
           } else {
-            // Fallback: choose by GUID numeric (descending) when no post_time
-            const fallback = Object.keys(user.posts||{})
-              .map(pid=>({ pid, bi: pidBigInt(pid) }))
-              .sort((a,b)=> (a.bi===b.bi ? a.pid.localeCompare(b.pid) : (a.bi < b.bi ? 1 : -1)));
-            fallback.slice(0,20).forEach(it=>visibleSet.add(it.pid));
+            effectiveSaved = { ids: savedVisibility.ids, source: 'custom' };
           }
         }
+        const canRestoreSaved = effectiveSaved && (!isDefaultVisibilitySource(effectiveSaved.source) || savedVisibility?.__fromSession);
+
+        // Top Today is a dynamic, virtual user: keep selections, but reconcile against the live post set.
+        if (isTopToday){
+          const allPids = Object.keys(user.posts||{});
+          const valid = new Set(allPids);
+          for (const pid of Array.from(visibleSet)){
+            if (!valid.has(pid)) visibleSet.delete(pid);
+          }
+          if (visibleSet.size === 0 && !preserveEmpty){
+            visibleSet.clear();
+            allPids.forEach(pid=>visibleSet.add(pid));
+            setListActionActive('showAll');
+            currentVisibilitySource = 'showAll';
+          }
+        } else if (visibleSet.size === 0){
+          if (canRestoreSaved){
+            visibleSet.clear();
+            (effectiveSaved.ids || []).forEach(pid=>{
+              if (pid && Object.prototype.hasOwnProperty.call(user.posts||{}, pid)) visibleSet.add(pid);
+            });
+            currentVisibilitySource = effectiveSaved.source || 'custom';
+            currentListActionId = effectiveSaved.source || null;
+            setListActionActive(currentListActionId);
+            persistListActionForUser(currentUserKey, currentListActionId);
+            if (visibleSet.size === 0 && !preserveEmpty){
+              visibleSet.clear();
+              Object.keys(user.posts||{}).forEach(pid=>visibleSet.add(pid));
+              setListActionActive('showAll');
+              currentVisibilitySource = 'showAll';
+            }
+          } else if (!preserveEmpty){
+            visibleSet.clear();
+            Object.keys(user.posts||{}).forEach(pid=>visibleSet.add(pid));
+            setListActionActive('showAll');
+            currentVisibilitySource = 'showAll';
+          }
+        }
+      if (listActionByUser[currentUserKey]) {
+        currentListActionId = listActionByUser[currentUserKey];
+        setListActionActive(currentListActionId);
       }
       buildPostsList(user, colorFor, visibleSet, { 
+        activeActionId: currentListActionId,
         onHover: (pid)=> { chart.setHoverSeries(pid); viewsChart.setHoverSeries(pid); first24HoursChart.setHoverSeries(pid); viewsPerPersonChart.setHoverSeries(pid); },
         onPurge: (pid, snippet) => showPostPurgeConfirm(snippet, pid)
       });
@@ -3952,7 +4371,8 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             if (t!=null && v!=null) pts.push({ x:Number(t), y:Number(v), t:Number(t) }); 
           }
           const color=colorFor(pid); 
-          const label = buildPostLabel({ ...p, id: pid }, user?.handle); 
+          const owner = user?.__specialKey === TOP_TODAY_KEY ? (p?.ownerHandle || '') : (user?.handle || '');
+          const label = buildPostLabel({ ...p, id: pid }, owner); 
           if (pts.length) out.push({ id: pid, label, color, points: pts, url: absUrl(p.url, pid) }); 
         }
         return out; })();
@@ -4125,6 +4545,8 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       // wire visibility toggles
       $$('#posts .toggle').forEach(btn=>{
         btn.addEventListener('click', ()=>{
+          currentVisibilitySource = 'custom';
+          setListActionActive(null);
           const pid = btn.dataset.pid; const row = btn.closest('.post');
           if (visibleSet.has(pid)) { visibleSet.delete(pid); row.classList.add('hidden'); btn.textContent='Show'; }
           else { visibleSet.add(pid); row.classList.remove('hidden'); btn.textContent='Hide'; }
@@ -4140,7 +4562,8 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
               for (const s of (p.snapshots||[])){
                 const t=s.t; const v=useUnique ? s.uv : s.views; if (t!=null && v!=null) pts.push({ x:Number(t), y:Number(v), t:Number(t) });
               }
-              const color=colorFor(vpid); const label=buildPostLabel({ ...p, id: vpid }, user?.handle); if (pts.length) out.push({ id: vpid, label, color, points: pts, url: absUrl(p.url, vpid) });
+              const owner = user?.__specialKey === TOP_TODAY_KEY ? (p?.ownerHandle || '') : (user?.handle || '');
+              const color=colorFor(vpid); const label=buildPostLabel({ ...p, id: vpid }, owner); if (pts.length) out.push({ id: vpid, label, color, points: pts, url: absUrl(p.url, vpid) });
             }
             return out; })();
           viewsChart.setData(vSeries);
@@ -4194,12 +4617,10 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     }
 
     $('#userSelect').addEventListener('change', async (e)=>{
-      currentUserKey = e.target.value; visibleSet.clear();
+      currentUserKey = e.target.value; visibleSet.clear(); currentVisibilitySource = null; currentListActionId = null; setListActionActive(null);
       try { await chrome.storage.local.set({ lastUserKey: currentUserKey }); } catch {}
-      // Reset to "Show All" when selecting a new user
-      const u = metrics.users[currentUserKey];
+      const u = resolveUserForKey(metrics, currentUserKey);
       if (u) {
-        Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid));
         chart.resetZoom();
         viewsPerPersonChart.resetZoom();
         viewsChart.resetZoom();
@@ -4209,15 +4630,15 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         cameosChart.resetZoom();
       }
       // If exactly one user in compare, replace it with the new selection
-      if (compareUsers.size === 1 && currentUserKey && metrics.users[currentUserKey]){
+      if (compareUsers.size === 1 && currentUserKey && resolveUserForKey(metrics, currentUserKey)){
         compareUsers.clear();
         addCompareUser(currentUserKey);
       }
       // If compare section is empty, add current user to show who we're looking at
-      else if (compareUsers.size === 0 && currentUserKey && metrics.users[currentUserKey]){
+      else if (compareUsers.size === 0 && currentUserKey && resolveUserForKey(metrics, currentUserKey)){
         addCompareUser(currentUserKey);
       }
-      refreshUserUI({ preserveEmpty: true });
+      await refreshUserUI();
       persistVisibility();
     });
 
@@ -4278,17 +4699,15 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       const list = filterUsersByQuery(metrics, e.target.value).slice(0, 20);
       suggestions.innerHTML = list.map(([key,u])=>{
         const count = Object.keys(u.posts||{}).length;
-        return `<div class="item" data-key="${key}"><span>${u.handle||key}</span><span style="color:#7d8a96">${count} posts</span></div>`;
+        return `<div class="item" data-key="${esc(key)}"><span>${esc(u.handle||key)}</span><span style="color:#7d8a96">${count} posts</span></div>`;
       }).join('');
       suggestions.style.display = list.length ? 'block' : 'none';
       $$('#suggestions .item').forEach(it=>{
         it.addEventListener('click', async ()=>{
-          currentUserKey = it.dataset.key; visibleSet.clear(); $('#search').value = ''; suggestions.style.display='none';
+          currentUserKey = it.dataset.key; visibleSet.clear(); currentVisibilitySource = null; currentListActionId = null; setListActionActive(null); $('#search').value = ''; suggestions.style.display='none';
           const sel = $('#userSelect'); sel.value = currentUserKey;
-          // Reset to "Show All" when selecting a new user
-          const u = metrics.users[currentUserKey];
+          const u = resolveUserForKey(metrics, currentUserKey);
           if (u) {
-            Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid));
             chart.resetZoom();
             viewsChart.resetZoom();
             followersChart.resetZoom();
@@ -4297,16 +4716,17 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             cameosChart.resetZoom();
           }
           // If exactly one user in compare, replace it with the new selection
-          if (compareUsers.size === 1 && currentUserKey && metrics.users[currentUserKey]){
+          if (compareUsers.size === 1 && currentUserKey && resolveUserForKey(metrics, currentUserKey)){
             compareUsers.clear();
             addCompareUser(currentUserKey);
           }
           // If compare section is empty, add current user to show who we're looking at
-          else if (compareUsers.size === 0 && currentUserKey && metrics.users[currentUserKey]){
+          else if (compareUsers.size === 0 && currentUserKey && resolveUserForKey(metrics, currentUserKey)){
             addCompareUser(currentUserKey);
           }
-          refreshUserUI();
+          await refreshUserUI();
           try { await chrome.storage.local.set({ lastUserKey: currentUserKey }); } catch {}
+          persistVisibility();
         });
       });
     });
@@ -4316,6 +4736,16 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       const sel = $('#compareUserSelect');
       if (!sel) return;
       sel.innerHTML = '<option value="">Select user to add…</option>';
+
+      // Add "Top Today" as a virtual compare option
+      if (!compareUsers.has(TOP_TODAY_KEY)){
+        const topToday = buildTopTodayUser(metrics);
+        const opt = document.createElement('option');
+        opt.value = TOP_TODAY_KEY;
+        opt.textContent = `${topToday.handle} (${Object.keys(topToday.posts||{}).length})`;
+        sel.appendChild(opt);
+      }
+
       const entries = Object.entries(metrics.users);
       const users = entries
         .filter(([key])=>!compareUsers.has(key))
@@ -4335,7 +4765,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         opt.textContent = `${u.handle || key} (${postCount})`;
         sel.appendChild(opt);
       });
-      sel.disabled = compareUsers.size >= MAX_COMPARE_USERS || users.length === 0;
+      sel.disabled = compareUsers.size >= MAX_COMPARE_USERS || (users.length === 0 && compareUsers.has(TOP_TODAY_KEY));
     }
 
     // Compare dropdown change handler
@@ -4353,10 +4783,10 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       const list = filterUsersByQuery(metrics, e.target.value)
         .filter(([key])=>!compareUsers.has(key))
         .slice(0, 20);
-      suggestions.innerHTML = list.map(([key,u])=>{
-        const count = Object.keys(u.posts||{}).length;
-        return `<div class="item" data-key="${key}"><span>${u.handle||key}</span><span style="color:#7d8a96">${count} posts</span></div>`;
-      }).join('');
+        suggestions.innerHTML = list.map(([key,u])=>{
+          const count = Object.keys(u.posts||{}).length;
+          return `<div class="item" data-key="${esc(key)}"><span>${esc(u.handle||key)}</span><span style="color:#7d8a96">${count} posts</span></div>`;
+        }).join('');
       suggestions.style.display = list.length ? 'block' : 'none';
       $$('#compareSuggestions .item').forEach(it=>{
         it.addEventListener('click', ()=>{
@@ -4400,14 +4830,14 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       }
     }
 
-    // Exceptions state
-    const exceptedUsers = new Set();
-    const MAX_EXCEPTED_USERS = 50;
-    const EXCEPTIONS_STORAGE_KEY = 'purgeExceptions';
-    const COMB_MODE_STORAGE_KEY = 'combModeEnabled';
-    const COMB_MODE_LAST_RUN_KEY = 'combModeLastRun';
-    let combModeEnabled = true; // Default to enabled
-    let combModeDailyTimer = null;
+	    // Exceptions state
+	    const exceptedUsers = new Set();
+	    const MAX_EXCEPTED_USERS = 50;
+	    const EXCEPTIONS_STORAGE_KEY = 'purgeExceptions';
+	    const COMB_MODE_STORAGE_KEY = 'combModeEnabled';
+	    const COMB_MODE_LAST_RUN_KEY = 'combModeLastRun';
+	    let combModeEnabled = true; // Default to enabled
+	    let combModeDailyTimer = null;
 
     async function loadExceptedUsers(){
       try {
@@ -4437,11 +4867,11 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       return combModeEnabled;
     }
 
-    async function saveCombModePreference(){
-      try {
-        await chrome.storage.local.set({ [COMB_MODE_STORAGE_KEY]: combModeEnabled });
-      } catch {}
-    }
+	    async function saveCombModePreference(){
+	      try {
+	        await chrome.storage.local.set({ [COMB_MODE_STORAGE_KEY]: combModeEnabled });
+	      } catch {}
+	    }
 
     async function updateStorageSizeDisplay(){
       try {
@@ -4523,7 +4953,6 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           await chrome.storage.local.set({ metrics });
           // Update last run time
           await chrome.storage.local.set({ [COMB_MODE_LAST_RUN_KEY]: now });
-          console.log(`[Comb Mode] Purged ${purgedSnapshots} snapshot(s)`);
           // Update storage size display if purge modal is open
           if (purgeModal && purgeModal.style.display !== 'none') {
             await updateStorageSizeDisplay();
@@ -4675,16 +5104,16 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     postCountSlider.addEventListener('input', updateSliderValues);
     followerCountSlider.addEventListener('input', updateSliderValues);
 
-    // Comb Mode checkbox handler
-    const combModeCheckbox = $('#combModeCheckbox');
-    if (combModeCheckbox) {
-      combModeCheckbox.addEventListener('change', async (e) => {
-        combModeEnabled = e.target.checked;
-        await saveCombModePreference();
-        // Reschedule daily timer based on new preference
-        scheduleCombModeDaily();
-      });
-    }
+	    // Comb Mode checkbox handler
+	    const combModeCheckbox = $('#combModeCheckbox');
+	    if (combModeCheckbox) {
+	      combModeCheckbox.addEventListener('change', async (e) => {
+	        combModeEnabled = e.target.checked;
+	        await saveCombModePreference();
+	        // Reschedule daily timer based on new preference
+	        scheduleCombModeDaily();
+	      });
+	    }
 
     // Exceptions functionality
     function buildExceptionsDropdown(){
@@ -4782,10 +5211,10 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       const list = filterUsersByQuery(metrics, e.target.value)
         .filter(([key])=>!exceptedUsers.has(key))
         .slice(0, 20);
-      suggestions.innerHTML = list.map(([key,u])=>{
-        const count = Object.keys(u.posts||{}).length;
-        return `<div class="item" data-key="${key}"><span>${u.handle||key}</span><span style="color:#7d8a96">${count} posts</span></div>`;
-      }).join('');
+        suggestions.innerHTML = list.map(([key,u])=>{
+          const count = Object.keys(u.posts||{}).length;
+          return `<div class="item" data-key="${esc(key)}"><span>${esc(u.handle||key)}</span><span style="color:#7d8a96">${count} posts</span></div>`;
+        }).join('');
       suggestions.style.display = list.length ? 'block' : 'none';
       $$('#exceptionsSuggestions .item').forEach(it=>{
         it.addEventListener('click', async ()=>{
@@ -4803,16 +5232,16 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       saved.forEach(key => exceptedUsers.add(key));
       renderExceptionPills();
       buildExceptionsDropdown();
-      updateSliderValues();
-      // Load comb mode preference
-      await loadCombModePreference();
-      const combModeCheckbox = $('#combModeCheckbox');
-      if (combModeCheckbox) {
-        combModeCheckbox.checked = combModeEnabled;
-      }
-      // Update storage size display
-      await updateStorageSizeDisplay();
-    });
+	      updateSliderValues();
+	      // Load comb mode preference
+	      await loadCombModePreference();
+	      const combModeCheckbox = $('#combModeCheckbox');
+	      if (combModeCheckbox) {
+	        combModeCheckbox.checked = combModeEnabled;
+	      }
+	      // Update storage size display
+	      await updateStorageSizeDisplay();
+	    });
 
     $('#purgeExecute').addEventListener('click', ()=>{
       const description = getPurgeDescription();
@@ -4857,7 +5286,6 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         let purgedUsers = 0;
         let purgedPosts = 0;
         
-        console.log('[Purge] Starting purge with cutoff:', new Date(cutoffTime).toISOString(), 'excepted users:', Array.from(exceptedUsers));
         
         // Process each user
         for (const [userKey, user] of Object.entries(metrics.users || {})){
@@ -4889,7 +5317,6 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             }
             const purgedCount = originalPostCount - Object.keys(postsToKeep).length;
             if (purgedCount > 0) {
-              console.log(`[Purge] User ${user.handle || userKey}: removed ${purgedCount}/${originalPostCount} posts`);
             }
           } else {
             // If days > 365, keep all posts (no date-based purging)
@@ -4933,7 +5360,6 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           }
         }
         
-        console.log('[Purge] Complete. Total removed:', purgedUsers, 'users,', purgedPosts, 'posts');
         
         // Save purged metrics
         await chrome.storage.local.set({ metrics });
@@ -4942,12 +5368,12 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         metrics = await loadMetrics();
         const prev = currentUserKey;
         const def = buildUserOptions(metrics);
-        if (!metrics.users[prev]) currentUserKey = def;
+        if (!(metrics.users[prev] || isTopTodayKey(prev))) currentUserKey = def;
         $('#userSelect').value = currentUserKey || '';
         
         // Clean up compare users that no longer exist
         for (const key of Array.from(compareUsers)){
-          if (!metrics.users[key]) compareUsers.delete(key);
+          if (!(metrics.users[key] || isTopTodayKey(key))) compareUsers.delete(key);
         }
         renderComparePills();
         buildCompareDropdown();
@@ -5001,10 +5427,10 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
               visibleSet.delete(pid);
               const prev = currentUserKey;
               const def = buildUserOptions(metrics);
-              if (!metrics.users[prev]) currentUserKey = def;
+              if (!(metrics.users[prev] || isTopTodayKey(prev))) currentUserKey = def;
               $('#userSelect').value = currentUserKey || '';
               for (const key of Array.from(compareUsers)){
-                if (!metrics.users[key]) compareUsers.delete(key);
+                if (!(metrics.users[key] || isTopTodayKey(key))) compareUsers.delete(key);
               }
               renderComparePills();
               buildCompareDropdown();
@@ -5033,14 +5459,14 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       const zViewsAll = allViewsChart.getZoom();
       metrics = await loadMetrics();
       const prev = currentUserKey; const def = buildUserOptions(metrics);
-      if (!metrics.users[prev]) currentUserKey = def;
+      if (!(metrics.users[prev] || isTopTodayKey(prev))) currentUserKey = def;
       $('#userSelect').value = currentUserKey || '';
       try { await chrome.storage.local.set({ lastUserKey: currentUserKey }); } catch {}
       updateBestTimeToPostSection();
       
       // Clean up compare users that no longer exist
       for (const key of Array.from(compareUsers)){
-        if (!metrics.users[key]) compareUsers.delete(key);
+        if (!(metrics.users[key] || isTopTodayKey(key))) compareUsers.delete(key);
       }
       renderComparePills();
       buildCompareDropdown();
@@ -5090,9 +5516,23 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       try { chrome.storage.local.set({ zoomStates }); } catch {}
     }
     window.addEventListener('beforeunload', persistZoom);
+
+    function setListActionActive(activeId){
+      currentListActionId = activeId || null;
+      try{
+        const wrap = document.querySelector('.list-actions');
+        if (!wrap) return;
+        wrap.querySelectorAll('button').forEach(btn=>{
+          if (btn.id === activeId) btn.classList.add('active');
+          else btn.classList.remove('active');
+        });
+      } catch {}
+      persistListActionForUser(currentUserKey, currentListActionId);
+    }
+
       $('#resetZoom').addEventListener('click', ()=>{ chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ skipRestoreZoom: true }); });
-      $('#showAll').addEventListener('click', ()=>{ const u = metrics.users[currentUserKey]; if (!u) return; visibleSet.clear(); Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid)); chart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ skipRestoreZoom: true }); persistVisibility(); });
-      $('#hideAll').addEventListener('click', ()=>{ visibleSet.clear(); chart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ preserveEmpty: true, skipRestoreZoom: true }); persistVisibility(); });
+      $('#showAll').addEventListener('click', ()=>{ currentVisibilitySource = 'showAll'; setListActionActive('showAll'); const u = resolveUserForKey(metrics, currentUserKey); if (!u) return; visibleSet.clear(); Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid)); chart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ skipRestoreZoom: true }); persistVisibility(); });
+      $('#hideAll').addEventListener('click', ()=>{ currentVisibilitySource = 'hideAll'; setListActionActive('hideAll'); visibleSet.clear(); chart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ preserveEmpty: true, skipRestoreZoom: true }); persistVisibility(); });
       // First 24 hours slider
       function fmtSliderTime(minutes){
         if (minutes < 60) return `${minutes}m`;
@@ -5122,11 +5562,14 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         viewsPerPersonSliderValue.textContent = fmtSliderTime(parseInt(viewsPerPersonSlider.value) || 1440);
       }
       $('#last5').addEventListener('click', ()=>{
-        const u = metrics.users[currentUserKey];
+        currentVisibilitySource = 'last5';
+        setListActionActive('last5');
+        const u = resolveUserForKey(metrics, currentUserKey);
         if (!u) return;
+        const isTopToday = isTopTodayKey(currentUserKey);
         const mapped = Object.entries(u.posts||{}).map(([pid,p])=>({
           pid,
-          postTime: getPostTimeStrict(p) || 0,
+          postTime: (isTopToday ? (getPostTimeStrict(p) || getPostTimeForRecency(p)) : getPostTimeStrict(p)) || 0,
           pidBI: pidBigInt(pid)
         }));
         const withTs = mapped.filter(x=>x.postTime>0).sort((a,b)=>b.postTime - a.postTime);
@@ -5141,11 +5584,14 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
       });
       $('#last10').addEventListener('click', ()=>{
-        const u = metrics.users[currentUserKey];
+        currentVisibilitySource = 'last10';
+        setListActionActive('last10');
+        const u = resolveUserForKey(metrics, currentUserKey);
         if (!u) return;
+        const isTopToday = isTopTodayKey(currentUserKey);
         const mapped = Object.entries(u.posts||{}).map(([pid,p])=>({
           pid,
-          postTime: getPostTimeStrict(p) || 0,
+          postTime: (isTopToday ? (getPostTimeStrict(p) || getPostTimeForRecency(p)) : getPostTimeStrict(p)) || 0,
           pidBI: pidBigInt(pid)
         }));
         const withTs = mapped.filter(x=>x.postTime>0).sort((a,b)=>b.postTime - a.postTime);
@@ -5160,86 +5606,240 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
       });
       $('#top5').addEventListener('click', ()=>{
-        const u = metrics.users[currentUserKey];
+        currentVisibilitySource = 'top5';
+        setListActionActive('top5');
+        const u = resolveUserForKey(metrics, currentUserKey);
         if (!u) return;
         const mapped = Object.entries(u.posts||{}).map(([pid,p])=>{
           const last = latestSnapshot(p.snapshots);
           return {
             pid,
-            views: num(last?.views)
+            views: num(last?.views),
+            likes: num(last?.likes),
+            postTime: getPostTimeStrict(p) || 0,
+            pidBI: pidBigInt(pid)
           };
         });
-        const sorted = mapped.sort((a,b)=>b.views - a.views);
+        const sorted = mapped.sort((a,b)=>{
+          const dl = b.likes - a.likes;
+          if (dl !== 0) return dl;
+          const dv = b.views - a.views;
+          if (dv !== 0) return dv;
+          const dt = (b.postTime || 0) - (a.postTime || 0);
+          if (dt !== 0) return dt;
+          if (a.pidBI === b.pidBI) return b.pid.localeCompare(a.pid);
+          return a.pidBI < b.pidBI ? 1 : -1;
+        });
         visibleSet.clear();
         sorted.slice(0, 5).forEach(it=>visibleSet.add(it.pid));
         chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
         refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
       });
       $('#top10').addEventListener('click', ()=>{
-        const u = metrics.users[currentUserKey];
+        currentVisibilitySource = 'top10';
+        setListActionActive('top10');
+        const u = resolveUserForKey(metrics, currentUserKey);
         if (!u) return;
         const mapped = Object.entries(u.posts||{}).map(([pid,p])=>{
           const last = latestSnapshot(p.snapshots);
           return {
             pid,
-            views: num(last?.views)
+            views: num(last?.views),
+            likes: num(last?.likes),
+            postTime: getPostTimeStrict(p) || 0,
+            pidBI: pidBigInt(pid)
           };
         });
-        const sorted = mapped.sort((a,b)=>b.views - a.views);
+        const sorted = mapped.sort((a,b)=>{
+          const dl = b.likes - a.likes;
+          if (dl !== 0) return dl;
+          const dv = b.views - a.views;
+          if (dv !== 0) return dv;
+          const dt = (b.postTime || 0) - (a.postTime || 0);
+          if (dt !== 0) return dt;
+          if (a.pidBI === b.pidBI) return b.pid.localeCompare(a.pid);
+          return a.pidBI < b.pidBI ? 1 : -1;
+        });
         visibleSet.clear();
         sorted.slice(0, 10).forEach(it=>visibleSet.add(it.pid));
         chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
         refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
       });
       $('#bottom5').addEventListener('click', ()=>{
-        const u = metrics.users[currentUserKey];
+        currentVisibilitySource = 'bottom5';
+        setListActionActive('bottom5');
+        const u = resolveUserForKey(metrics, currentUserKey);
         if (!u) return;
+        const isTopToday = isTopTodayKey(currentUserKey);
         const now = Date.now();
         const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
         const mapped = Object.entries(u.posts||{}).map(([pid,p])=>{
-          const postTime = getPostTimeStrict(p) || 0;
+          const postTime = (isTopToday ? (getPostTimeStrict(p) || getPostTimeForRecency(p)) : getPostTimeStrict(p)) || 0;
           const ageMs = postTime ? now - postTime : Infinity;
           const last = latestSnapshot(p.snapshots);
           return {
             pid,
             postTime,
             views: num(last?.views),
-            ageMs
+            likes: num(last?.likes),
+            ageMs,
+            pidBI: pidBigInt(pid)
           };
         });
-        const olderThan24h = mapped.filter(x=>x.ageMs > TWENTY_FOUR_HOURS_MS);
-        const sorted = olderThan24h.sort((a,b)=>a.views - b.views);
+        const picked = (function(){
+          if (isTopToday){
+            const sorted = mapped.slice().sort((a,b)=>{
+              const dl = a.likes - b.likes;
+              if (dl !== 0) return dl;
+              const dv = a.views - b.views;
+              if (dv !== 0) return dv;
+              const dt = (a.postTime || 0) - (b.postTime || 0);
+              if (dt !== 0) return dt;
+              if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+              return a.pidBI < b.pidBI ? -1 : 1;
+            });
+            return sorted.slice(0, 5);
+          }
+          const olderThan24h = mapped.filter(x=>x.ageMs > TWENTY_FOUR_HOURS_MS);
+          const sortedOlder = olderThan24h.sort((a,b)=>{
+            const dl = a.likes - b.likes;
+            if (dl !== 0) return dl;
+            const dv = a.views - b.views;
+            if (dv !== 0) return dv;
+            const dt = (a.postTime || 0) - (b.postTime || 0); // tie-break oldest first
+            if (dt !== 0) return dt;
+            if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+            return a.pidBI < b.pidBI ? -1 : 1; // final tie-break oldest-ish first
+          });
+          const sortedAll = mapped.slice().sort((a,b)=>{
+            const dl = a.likes - b.likes;
+            if (dl !== 0) return dl;
+            const dv = a.views - b.views;
+            if (dv !== 0) return dv;
+            const dt = (a.postTime || 0) - (b.postTime || 0);
+            if (dt !== 0) return dt;
+            if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+            return a.pidBI < b.pidBI ? -1 : 1;
+          });
+          const out = [];
+          for (const it of sortedOlder) {
+            if (out.length >= 5) break;
+            out.push(it);
+          }
+          if (out.length < 5) {
+            const seen = new Set(out.map(p=>p.pid));
+            for (const it of sortedAll) {
+              if (out.length >= 5) break;
+              if (seen.has(it.pid)) continue;
+              out.push(it);
+            }
+          }
+          return out;
+        })();
         visibleSet.clear();
-        sorted.slice(0, 5).forEach(it=>visibleSet.add(it.pid));
+        picked.forEach(it=>visibleSet.add(it.pid));
         chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
-        refreshUserUI(); persistVisibility();
+        refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
       });
       $('#bottom10').addEventListener('click', ()=>{
-        const u = metrics.users[currentUserKey];
+        currentVisibilitySource = 'bottom10';
+        setListActionActive('bottom10');
+        const u = resolveUserForKey(metrics, currentUserKey);
         if (!u) return;
+        const isTopToday = isTopTodayKey(currentUserKey);
         const now = Date.now();
         const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
         const mapped = Object.entries(u.posts||{}).map(([pid,p])=>{
-          const postTime = getPostTimeStrict(p) || 0;
+          const postTime = (isTopToday ? (getPostTimeStrict(p) || getPostTimeForRecency(p)) : getPostTimeStrict(p)) || 0;
           const ageMs = postTime ? now - postTime : Infinity;
           const last = latestSnapshot(p.snapshots);
           return {
             pid,
             postTime,
             views: num(last?.views),
-            ageMs
+            likes: num(last?.likes),
+            ageMs,
+            pidBI: pidBigInt(pid)
           };
         });
-        const olderThan24h = mapped.filter(x=>x.ageMs > TWENTY_FOUR_HOURS_MS);
-        const sorted = olderThan24h.sort((a,b)=>a.views - b.views);
+        const picked = (function(){
+          if (isTopToday){
+            const sorted = mapped.slice().sort((a,b)=>{
+              const dl = a.likes - b.likes;
+              if (dl !== 0) return dl;
+              const dv = a.views - b.views;
+              if (dv !== 0) return dv;
+              const dt = (a.postTime || 0) - (b.postTime || 0);
+              if (dt !== 0) return dt;
+              if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+              return a.pidBI < b.pidBI ? -1 : 1;
+            });
+            return sorted.slice(0, 10);
+          }
+          const olderThan24h = mapped.filter(x=>x.ageMs > TWENTY_FOUR_HOURS_MS);
+          const sortedOlder = olderThan24h.sort((a,b)=>{
+            const dl = a.likes - b.likes;
+            if (dl !== 0) return dl;
+            const dv = a.views - b.views;
+            if (dv !== 0) return dv;
+            const dt = (a.postTime || 0) - (b.postTime || 0);
+            if (dt !== 0) return dt;
+            if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+            return a.pidBI < b.pidBI ? -1 : 1;
+          });
+          const sortedAll = mapped.slice().sort((a,b)=>{
+            const dl = a.likes - b.likes;
+            if (dl !== 0) return dl;
+            const dv = a.views - b.views;
+            if (dv !== 0) return dv;
+            const dt = (a.postTime || 0) - (b.postTime || 0);
+            if (dt !== 0) return dt;
+            if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+            return a.pidBI < b.pidBI ? -1 : 1;
+          });
+          const out = [];
+          for (const it of sortedOlder) {
+            if (out.length >= 10) break;
+            out.push(it);
+          }
+          if (out.length < 10) {
+            const seen = new Set(out.map(p=>p.pid));
+            for (const it of sortedAll) {
+              if (out.length >= 10) break;
+              if (seen.has(it.pid)) continue;
+              out.push(it);
+            }
+          }
+          return out;
+        })();
         visibleSet.clear();
-        sorted.slice(0, 10).forEach(it=>visibleSet.add(it.pid));
+        picked.forEach(it=>visibleSet.add(it.pid));
         chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
         refreshUserUI({ skipRestoreZoom: true }); persistVisibility();
       });
 
+      const staleBtn = $('#stale');
+      if (staleBtn) staleBtn.addEventListener('click', ()=>{
+        currentVisibilitySource = 'stale';
+        setListActionActive('stale');
+        const u = resolveUserForKey(metrics, currentUserKey);
+        if (!u) return;
+        const now = Date.now();
+        const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+        const mapped = Object.entries(u.posts||{}).map(([pid,p])=>{
+          const lastRefresh = lastRefreshMsForPost(p);
+          const ageMs = lastRefresh ? now - lastRefresh : Infinity;
+          return { pid, ageMs };
+        });
+        const stale = mapped.filter(x=>x.ageMs > TWENTY_FOUR_HOURS_MS);
+        visibleSet.clear();
+        stale.forEach(it=>visibleSet.add(it.pid));
+        chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
+        refreshUserUI({ preserveEmpty: true, skipRestoreZoom: true }); persistVisibility();
+      });
+
     // If compare section is empty on initial load, add current user to show who we're looking at
-    if (compareUsers.size === 0 && currentUserKey && metrics.users[currentUserKey]){
+    if (compareUsers.size === 0 && currentUserKey && resolveUserForKey(metrics, currentUserKey)){
       addCompareUser(currentUserKey);
     }
     refreshUserUI();
