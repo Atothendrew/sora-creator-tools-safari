@@ -507,7 +507,26 @@
       if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
       return a.pidBI < b.pidBI ? 1 : -1; // descending: bigger id => newer first
     });
-    const posts = withTs.concat(noTs);
+    let posts = withTs.concat(noTs);
+
+    const captionNeedle = (opts.captionFilter || '').trim().toLowerCase();
+    if (captionNeedle){
+      posts = posts.filter(p=>{
+        const haystacks = [
+          p.caption,
+          p.label,
+          p.title,
+          p.pid,
+          Array.isArray(p.cameos) ? p.cameos.join(' ') : '',
+          p.owner
+        ];
+        return haystacks.some(h=> typeof h === 'string' && h.toLowerCase().includes(captionNeedle));
+      });
+    }
+
+    if (typeof opts.onFilterStats === 'function'){
+      opts.onFilterStats({ total: withTs.length + noTs.length, filtered: posts.length, query: captionNeedle });
+    }
 
     // If a list-action filter is active, surface selected posts to top.
     let orderedPosts = posts;
@@ -3133,6 +3152,35 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     let zoomStates = {};
     try { const st = await chrome.storage.local.get('zoomStates'); zoomStates = st.zoomStates || {}; } catch {}
     const visibleSet = new Set();
+    const CAPTION_FILTER_KEY = 'dashboardCaptionFilter';
+    let captionFilter = '';
+    const captionFilterInput = $('#captionFilterInput');
+    const captionFilterSummaryEl = $('#captionFilterSummary');
+    try {
+      const st = await chrome.storage.local.get(CAPTION_FILTER_KEY);
+      if (st && typeof st[CAPTION_FILTER_KEY] === 'string') captionFilter = st[CAPTION_FILTER_KEY];
+    } catch {}
+    if (captionFilterInput) captionFilterInput.value = captionFilter;
+    const updateCaptionFilterSummary = (stats)=>{
+      if (!captionFilterSummaryEl) return;
+      const q = (captionFilter || '').trim();
+      if (!q){
+        if (typeof stats?.total === 'number'){
+          const label = stats.total === 1 ? 'post' : 'posts';
+          captionFilterSummaryEl.textContent = `Showing ${stats.total} ${label}`;
+        } else {
+          captionFilterSummaryEl.textContent = 'Showing all captions';
+        }
+        return;
+      }
+      const filtered = typeof stats?.filtered === 'number' ? stats.filtered : 0;
+      const total = typeof stats?.total === 'number' ? stats.total : 0;
+      const label = filtered === 1 ? 'post' : 'posts';
+      captionFilterSummaryEl.textContent = `Showing ${filtered}/${total} ${label} matching “${q}”`;
+    };
+    const persistCaptionFilter = (q)=>{
+      try { chrome.storage.local.set({ [CAPTION_FILTER_KEY]: q }); } catch {}
+    };
     let visibilityByUser = {};
     const sessionVisibilityByUser = (function(){
       try { return JSON.parse(sessionStorage.getItem('visibilityByUserSession') || '{}'); } catch { return {}; }
@@ -4249,14 +4297,15 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       viewsPerPersonChart.setData(vppSeries, timeWindowMinutes);
     }
 
-	    async function refreshUserUI(opts={}){
-	      const { preserveEmpty=false, skipRestoreZoom=false } = opts;
-	      const user = resolveUserForKey(metrics, currentUserKey);
-	      if (!user){
+    async function refreshUserUI(opts={}){
+      const { preserveEmpty=false, skipRestoreZoom=false } = opts;
+      const user = resolveUserForKey(metrics, currentUserKey);
+      if (!user){
           setListActionActive('showAll');
           currentVisibilitySource = 'showAll';
-	        buildPostsList(null, ()=>COLORS[0], new Set()); chart.setData([]); return;
-	      }
+        updateCaptionFilterSummary({ total:0, filtered:0 });
+        buildPostsList(null, ()=>COLORS[0], new Set()); chart.setData([]); return;
+      }
       // No precompute needed for IR; use latest available remix count only for cards
       // Integrity check: remove posts incorrectly attributed to this user
       // Reconcile ownership (selected user only), then reclaim, then remove empty posts
@@ -4321,7 +4370,9 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       buildPostsList(user, colorFor, visibleSet, { 
         activeActionId: currentListActionId,
         onHover: (pid)=> { chart.setHoverSeries(pid); viewsChart.setHoverSeries(pid); first24HoursChart.setHoverSeries(pid); viewsPerPersonChart.setHoverSeries(pid); },
-        onPurge: (pid, snippet) => showPostPurgeConfirm(snippet, pid)
+        onPurge: (pid, snippet) => showPostPurgeConfirm(snippet, pid),
+        captionFilter,
+        onFilterStats: updateCaptionFilterSummary
       });
       const useUnique = viewsChartType === 'unique';
       const series = computeSeriesForUser(user, [], colorFor, useUnique)
@@ -5497,6 +5548,15 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       } catch {}
       persistListActionForUser(currentUserKey, currentListActionId);
     }
+
+    if (captionFilterInput) {
+      captionFilterInput.addEventListener('input', (e)=>{
+        captionFilter = e.target.value || '';
+        persistCaptionFilter(captionFilter);
+        refreshUserUI({ preserveEmpty: true });
+      });
+    }
+    updateCaptionFilterSummary(null);
 
       $('#resetZoom').addEventListener('click', ()=>{ chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ skipRestoreZoom: true }); });
       $('#showAll').addEventListener('click', ()=>{ currentVisibilitySource = 'showAll'; setListActionActive('showAll'); const u = resolveUserForKey(metrics, currentUserKey); if (!u) return; visibleSet.clear(); Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid)); chart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ skipRestoreZoom: true }); persistVisibility(); });

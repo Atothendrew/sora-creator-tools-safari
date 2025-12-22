@@ -33,6 +33,11 @@
         <button id="bottom10" title="Show 10 least liked posts (excluding last 24 hours)">Bottom 10</button>
         <button id="stale" title="Show posts whose metrics haven't refreshed in 24h">Stale</button>
       </div>
+      <div class="caption-filter">
+        <label for="captionFilterInput">Caption Search</label>
+        <input id="captionFilterInput" type="search" placeholder="Search captions…" autocomplete="off" />
+        <div class="caption-filter-summary" id="captionFilterSummary">Showing all captions</div>
+      </div>
       <div id="posts" class="posts"></div>
     </aside>
     <section class="content">
