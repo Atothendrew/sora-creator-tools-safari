@@ -1,4 +1,10 @@
 /* Dashboard for Sora Metrics */
+
+/* Safari compatibility: expose chrome namespace when only browser.* exists */
+if (typeof browser !== 'undefined' && typeof chrome === 'undefined') {
+  globalThis.chrome = browser;
+}
+
 (function(){
   'use strict';
 

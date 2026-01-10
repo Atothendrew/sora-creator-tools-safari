@@ -3,6 +3,11 @@
  * Licensed under the MIT License. See the LICENSE file for details.
  */
 
+/* Safari compatibility: expose chrome namespace when only browser.* exists */
+if (typeof browser !== 'undefined' && typeof chrome === 'undefined') {
+  globalThis.chrome = browser;
+}
+
 (() => {
   const p = String(location.pathname || '');
   const isDraftDetail = p === '/d' || p.startsWith('/d/');
