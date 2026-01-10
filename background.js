@@ -1,3 +1,8 @@
+/* Safari compatibility: expose chrome namespace when only browser.* exists */
+if (typeof browser !== 'undefined' && typeof chrome === 'undefined') {
+  globalThis.chrome = browser;
+}
+
 /* Open full dashboard page when the action icon is clicked */
 chrome.action.onClicked.addListener(() => {
   const url = chrome.runtime.getURL('dashboard.html');

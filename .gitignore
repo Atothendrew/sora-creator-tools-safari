@@ -4,3 +4,7 @@
 .examples/
 .claude/
 /dist/
+
+# Xcode user data
+xcuserdata/
+*.xcuserstate
