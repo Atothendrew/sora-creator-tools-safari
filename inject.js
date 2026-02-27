@@ -2970,16 +2970,15 @@
     });
 
     // Inject gather slider CSS once
+    // NOTE: Do NOT remove native thumb appearance here.
+    // Safari can become effectively non-draggable if the thumb appearance is reset
+    // without providing a full custom thumb style.
     if (!document.getElementById('sora-uv-gather-slider-style')) {
       const st = document.createElement('style');
       st.id = 'sora-uv-gather-slider-style';
       st.textContent = `
-        .sora-uv-controls input[type="range"]::-webkit-slider-thumb {
-          appearance: none;
-          -webkit-appearance: none;
-        }
-        .sora-uv-controls input[type="range"]::-moz-range-thumb {
-          border: none;
+        .sora-uv-controls input[type="range"] {
+          accent-color: rgba(53, 129, 255, 0.95);
         }
       `;
       document.head.appendChild(st);
