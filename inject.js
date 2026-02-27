@@ -57,6 +57,7 @@
   const MIN_PER_H = 60;
   const MIN_PER_D = 1440;
   const MIN_PER_Y = 525600;
+  const HOT_FLAME_MAX_AGE_MIN = 24 * MIN_PER_H; // 4/5 flames only apply within first 24h
 
   // Debug toggle for characters
   DEBUG.characters = false;
@@ -96,6 +97,114 @@
   const DRAFT_BUTTON_SPACING = 4; // px between buttons
   const SORA_DEFAULT_FPS = 30; // Sora standard framerate (fallback if API doesn't provide fps)
 
+  // == UV Drafts Page Constants ==
+  let capturedAuthToken = null; // Captured from intercepted fetch requests
+  let modelOverride = null; // Custom model override for create requests
+  let uvDraftsPage = null;
+  const UV_DRAFTS_DOC_TITLE = 'My Drafts - Sora';
+  let uvDraftsPrevDocTitle = null;
+  let uvDraftsTitleGuardTimer = null;
+  const UV_DRAFTS_TITLE_GUARD_MS = 1000;
+
+  function ensureUVDraftsPageModule() {
+    if (uvDraftsPage) return uvDraftsPage;
+    const factory = window.SoraUVDraftsPageModule;
+    if (typeof factory !== 'function') return null;
+    uvDraftsPage = factory({ defaultFps: SORA_DEFAULT_FPS });
+    try {
+      uvDraftsPage.setCapturedAuthToken?.(capturedAuthToken);
+      uvDraftsPage.setModelOverride?.(modelOverride);
+    } catch {}
+    return uvDraftsPage;
+  }
+
+  function setCurrentModelOverride(value) {
+    modelOverride = typeof value === 'string' && value ? value : null;
+    try {
+      ensureUVDraftsPageModule()?.setModelOverride?.(modelOverride);
+    } catch {}
+  }
+
+  function getActiveModelOverride() {
+    try {
+      return ensureUVDraftsPageModule()?.getModelOverride?.() || modelOverride;
+    } catch {
+      return modelOverride;
+    }
+  }
+
+  function ensureUVDraftsPage() {
+    return ensureUVDraftsPageModule()?.ensureUVDraftsPage?.() || null;
+  }
+
+  function hideUVDraftsPage() {
+    ensureUVDraftsPageModule()?.hideUVDraftsPage?.();
+  }
+
+  function startScheduledPostsTimer() {
+    ensureUVDraftsPageModule()?.startScheduledPostsTimer?.();
+  }
+
+  function setUVDraftsDocumentTitle() {
+    try {
+      const currentTitle = typeof document.title === 'string' ? document.title : '';
+      if (uvDraftsPrevDocTitle == null && currentTitle !== UV_DRAFTS_DOC_TITLE) {
+        uvDraftsPrevDocTitle = currentTitle;
+      }
+      if (currentTitle !== UV_DRAFTS_DOC_TITLE) {
+        document.title = UV_DRAFTS_DOC_TITLE;
+      }
+    } catch {}
+  }
+
+  function startUVDraftsTitleGuard() {
+    setUVDraftsDocumentTitle();
+    if (uvDraftsTitleGuardTimer) return;
+    uvDraftsTitleGuardTimer = setInterval(() => {
+      if (!isUVDrafts()) return;
+      setUVDraftsDocumentTitle();
+    }, UV_DRAFTS_TITLE_GUARD_MS);
+  }
+
+  function stopUVDraftsTitleGuard() {
+    if (uvDraftsTitleGuardTimer) {
+      clearInterval(uvDraftsTitleGuardTimer);
+      uvDraftsTitleGuardTimer = null;
+    }
+  }
+
+  function restoreDocumentTitleAfterUVDrafts() {
+    try {
+      stopUVDraftsTitleGuard();
+      if (uvDraftsPrevDocTitle != null) {
+        if (document.title !== uvDraftsPrevDocTitle) {
+          document.title = uvDraftsPrevDocTitle;
+        }
+      }
+    } catch {}
+    uvDraftsPrevDocTitle = null;
+  }
+
+  function checkPendingComposePrompt() {
+    ensureUVDraftsPageModule()?.checkPendingComposePrompt?.();
+  }
+
+  function loadPendingCreateOverrides() {
+    return ensureUVDraftsPageModule()?.loadPendingCreateOverrides?.() || null;
+  }
+
+  function clearPendingCreateOverrides() {
+    ensureUVDraftsPageModule()?.clearPendingCreateOverrides?.();
+  }
+
+  function applyComposerOverridesToCreateBody(bodyString, overrides) {
+    const moduleApi = ensureUVDraftsPageModule();
+    if (moduleApi?.applyComposerOverridesToCreateBody) {
+      return moduleApi.applyComposerOverridesToCreateBody(bodyString, overrides);
+    }
+    return bodyString;
+  }
+
   // == UI State ==
   let controlBar = null;
   let gatherTimerEl = null;
@@ -105,6 +214,8 @@
   let characterSortMode = 'date'; // 'date', 'likes', 'cameos', 'likesPerDay'
   let charAutoLoadLastAttemptMs = 0;
   let suppressDetailBadgeRender = false; // Flag to prevent renderDetailBadge during bulk processing
+  let badgeDataGeneration = 0; // Incremented when new metric data arrives; badges skip re-render when unchanged
+  let renderPassInFlight = false; // Suppresses observer-triggered renders while processFeedJson is rendering
 
   let gatherScrollIntervalId = null;
   let gatherRefreshTimeoutId = null;
@@ -258,6 +369,7 @@
   const isProfile = () => location.pathname.startsWith('/profile');
   const isPost = () => /^\/p\/s_[A-Za-z0-9]+/i.test(location.pathname);
   const isDraftDetail = () => location.pathname === '/d' || location.pathname.startsWith('/d/');
+  const isUVDrafts = () => location.pathname === '/uv-drafts' || location.pathname.startsWith('/uv-drafts');
 
   const isTopFeed = () => {
     try {
@@ -437,6 +549,16 @@
       return { handle: null, id: null };
     }
   }
+  const BLOCKED_THUMB_HOSTS = new Set(['ogimg.chatgpt.com']);
+  const isValidCollectorThumbUrl = (value) => {
+    if (typeof value !== 'string' || !/^https?:\/\//.test(value)) return false;
+    try {
+      const host = new URL(value).hostname.toLowerCase();
+      return !BLOCKED_THUMB_HOSTS.has(host);
+    } catch {
+      return false;
+    }
+  };
   const getThumbnail = (item) => {
     try {
       const p = item?.post ?? item;
@@ -445,12 +567,12 @@
       if (atts)
         for (const att of atts) {
           const t = att?.encodings?.thumbnail?.path;
-          if (typeof t === 'string' && /^https?:\/\//.test(t)) {
+          if (isValidCollectorThumbUrl(t)) {
             dlog('thumbs', 'picked', { id, source: 'att.encodings.thumbnail', url: t });
             return t;
           }
         }
-      if (typeof p?.preview_image_url === 'string' && /^https?:\/\//.test(p.preview_image_url)) {
+      if (isValidCollectorThumbUrl(p?.preview_image_url)) {
         dlog('thumbs', 'picked', { id, source: 'preview_image_url', url: p.preview_image_url });
         return p.preview_image_url;
       }
@@ -465,7 +587,7 @@
         ['poster.url', p?.poster?.url],
       ];
       for (const [label, u] of pairs)
-        if (typeof u === 'string' && /^https?:\/\//.test(u)) {
+        if (isValidCollectorThumbUrl(u)) {
           dlog('thumbs', 'picked', { id, source: label, url: u });
           return u;
         }
@@ -547,8 +669,11 @@
   function isBadCardContainer(el) {
     try {
       if (!el || el === document.body || el === document.documentElement) return true;
-      const style = getComputedStyle(el);
-      if (style.position === 'fixed' || style.position === 'sticky') return true;
+      const cls = typeof el.className === 'string' ? el.className : '';
+      if (cls.includes('fixed') || cls.includes('sticky')) return true;
+      // Check inline style as fallback
+      const pos = el.style?.position;
+      if (pos === 'fixed' || pos === 'sticky') return true;
       // Avoid nav/sidebars/toolbars that sometimes contain post links.
       const role = el.getAttribute?.('role');
       if (role === 'navigation' || role === 'menubar' || role === 'toolbar') return true;
@@ -567,7 +692,9 @@
         if (!isBadCardContainer(el)) return el;
       }
       const cls = typeof el.className === 'string' ? el.className : '';
-      const hasMedia = !!el.querySelector?.('video, img, canvas');
+      const hasMedia = el.dataset.uvHasMedia != null
+        ? el.dataset.uvHasMedia === '1'
+        : (el.dataset.uvHasMedia = el.querySelector('video, img, canvas') ? '1' : '0') === '1';
       const looksCardy =
         hasMedia &&
         (cls.includes('rounded') || cls.includes('overflow-hidden') || cls.includes('shadow') || cls.includes('group'));
@@ -696,13 +823,6 @@
     return nearest >= 1440 && diff <= windowMin;
   }
   const greenEmblemColor = () => 'hsla(120, 85%, 32%, 0.92)';
-  const SUPER_HOT_THRESHOLDS = [
-    { minLikes: 50, maxAgeMin: 60 },
-    { minLikes: 100, maxAgeMin: 120 },
-    { minLikes: 150, maxAgeMin: 180 },
-    { minLikes: 200, maxAgeMin: 240 },
-    { minLikes: 250, maxAgeMin: 300 },
-  ];
   const FIRE_THRESHOLDS = [
     { maxHours: 6, flames: '🔥🔥🔥' },
     { maxHours: 12, flames: '🔥🔥' },
@@ -717,13 +837,16 @@
     return '';
   }
   function isSuperHotByRate(likes, ageMin) {
-    if (!Number.isFinite(ageMin)) return false;
+    if (!Number.isFinite(ageMin) || ageMin <= 0 || ageMin >= HOT_FLAME_MAX_AGE_MIN) return false;
     const l = Number(likes);
     if (!Number.isFinite(l) || l < 0) return false;
-    for (const rule of SUPER_HOT_THRESHOLDS) {
-      if (ageMin <= rule.maxAgeMin && l >= rule.minLikes) return true;
-    }
-    return false;
+    return l >= 10 && l >= (5 * ageMin) / 6;
+  }
+  function isVeryHotByRate(likes, ageMin) {
+    if (!Number.isFinite(ageMin) || ageMin < 10 || ageMin >= HOT_FLAME_MAX_AGE_MIN) return false;
+    const l = Number(likes);
+    if (!Number.isFinite(l) || l < 0) return false;
+    return l >= (4 * ageMin) / 6;
   }
 
   // Tooltip (1s delayed, cursor-follow)
@@ -836,7 +959,9 @@
   function ensureBadge(card) {
     let badge = card.querySelector('.sora-uv-badge');
     if (!badge) {
-      if (getComputedStyle(card).position === 'static') card.style.position = 'relative';
+      if (!card.style.position && !card.className?.includes('relative') && !card.className?.includes('absolute')) {
+        card.style.position = 'relative';
+      }
       badge = document.createElement('div');
       badge.className = 'sora-uv-badge';
       Object.assign(badge.style, {
@@ -1371,6 +1496,7 @@
   function badgeStateFor(likes, ageMin) {
     return {
       isSuperHot: isSuperHotByRate(likes, ageMin),
+      isVeryHot: isVeryHotByRate(likes, ageMin),
       isNearDay: isNearWholeDay(ageMin),
       isHot: likes >= 25,
     };
@@ -1382,6 +1508,7 @@
     const likes = idToLikes.get(id) ?? 0;
     const state = badgeStateFor(likes, ageMin);
     if (state.isSuperHot) return colorForAgeMin(0);
+    if (state.isVeryHot) return colorForAgeMin(0);
     if (state.isNearDay) return greenEmblemColor();
     if (state.isHot) return colorForAgeMin(ageMin);
     return null;
@@ -1392,6 +1519,7 @@
     const likes = idToLikes.get(id) ?? 0;
     const state = badgeStateFor(likes, ageMin);
     if (state.isSuperHot) return '🔥🔥🔥🔥🔥';
+    if (state.isVeryHot) return '🔥🔥🔥🔥';
     if (state.isNearDay) return '📝';
     if (state.isHot) return fireForAge(ageMin);
     return '';
@@ -1449,6 +1577,7 @@
     const likes = idToLikes.get(id) ?? 0;
     const ageMin = meta?.ageMin;
     const isSuperHot = isSuperHotByRate(likes, ageMin);
+    const isVeryHot = isVeryHotByRate(likes, ageMin);
 
     const uv = idToUnique.get(id);
     const totalViews = idToViews.get(id);
@@ -1514,6 +1643,8 @@
       el.style.background = pillBg;
       if (isSuperHot) {
         el.style.boxShadow = '0 0 10px 3px hsla(0, 100%, 50%, 0.7)';
+      } else if (isVeryHot) {
+        el.style.boxShadow = '0 0 8px 2px hsla(0, 100%, 50%, 0.5)';
       }
     }
     if (durationStr) {
@@ -1539,14 +1670,18 @@
 
   function renderBadges() {
     ensureControlBar();
-    for (const card of selectAllCards()) {
+    const cards = selectAllCards();
+    const gen = String(badgeDataGeneration);
+    for (const card of cards) {
+      if (card.dataset.uvBadgeGen === gen) continue; // skip if no new data
       const id = extractIdFromCard(card);
       if (!id) continue;
       const uv = idToUnique.get(id);
       const meta = idToMeta.get(id);
       addBadge(card, uv, meta);
+      card.dataset.uvBadgeGen = gen;
     }
-    applyFilter();
+    applyFilter(cards);
   }
 
   function renderBookmarkButtons() {
@@ -2147,6 +2282,7 @@
     const meta = idToMeta.get(sid);
     const ageMin = meta?.ageMin;
     const isSuperHot = isSuperHotByRate(likes ?? 0, ageMin);
+    const isVeryHot = isVeryHotByRate(likes ?? 0, ageMin);
 
     // Match feed badge format exactly
     const viewsStr = uv != null ? `👀 ${fmt(uv)}` : null;
@@ -2234,6 +2370,8 @@
 
       if (isSuperHot) {
         timeEl.style.boxShadow = '0 0 10px 3px hsla(0, 100%, 50%, 0.7)';
+      } else if (isVeryHot) {
+        timeEl.style.boxShadow = '0 0 8px 2px hsla(0, 100%, 50%, 0.5)';
       }
     }
 
@@ -2577,8 +2715,13 @@
     tryUpdateFeedButton();
     
     // Watch for DOM changes in case button is added dynamically
+    let _feedBtnRaf = null;
     const observer = new MutationObserver(() => {
-      tryUpdateFeedButton();
+      if (_feedBtnRaf) cancelAnimationFrame(_feedBtnRaf);
+      _feedBtnRaf = requestAnimationFrame(() => {
+        _feedBtnRaf = null;
+        tryUpdateFeedButton();
+      });
     });
     observer.observe(document.body, { childList: true, subtree: true });
     bar._feedButtonObserver = observer;
@@ -3935,6 +4078,7 @@
     return ov;
   }
 
+
   function updateAnalyzeHeaderSortIndicators() {
     const table = analyzeTableEl;
     if (!table || !table.tHead) return;
@@ -4440,8 +4584,8 @@ async function renderAnalyzeTable(force = false) {
 	  }
 
 
-  function hideAllCards(hide) {
-    for (const card of selectAllCards()) {
+  function hideAllCards(hide, cachedCards) {
+    for (const card of (cachedCards || selectAllCards())) {
       if (hide) card.style.display = 'none';
       else card.style.display = '';
     }
@@ -4629,13 +4773,13 @@ async function renderAnalyzeTable(force = false) {
   }
 
   // == Filtering ==
-  function applyFilter() {
+  function applyFilter(cachedCards) {
     if (analyzeActive) return; // overlay handles visibility
     const s = getGatherState();
     const idx = s.filterIndex ?? 0;
     const limitMin = FILTER_STEPS_MIN[idx];
 
-    for (const card of selectAllCards()) {
+    for (const card of (cachedCards || selectAllCards())) {
       const id = extractIdFromCard(card);
       const meta = idToMeta.get(id);
       // If we're not on a page where filters apply, don't hide anything.
@@ -4994,7 +5138,66 @@ async function renderAnalyzeTable(force = false) {
     };
     const origFetch = window.fetch;
     window.fetch = async function (input, init) {
-      const res = await origFetch.apply(this, arguments);
+      // Capture Authorization header from outgoing requests for UV Drafts API
+      try {
+        let headers = init?.headers;
+
+        // Also check if input is a Request object with headers
+        if (!headers && input instanceof Request) {
+          headers = input.headers;
+        }
+
+        if (headers) {
+          let authHeader = null;
+          if (headers instanceof Headers) {
+            authHeader = headers.get('Authorization');
+          } else if (Array.isArray(headers)) {
+            const entry = headers.find(h => h[0]?.toLowerCase() === 'authorization');
+            if (entry) authHeader = entry[1];
+          } else if (typeof headers === 'object') {
+            authHeader = headers['Authorization'] || headers['authorization'];
+          }
+          if (authHeader && authHeader.startsWith('Bearer ')) {
+            capturedAuthToken = authHeader;
+            ensureUVDraftsPageModule()?.setCapturedAuthToken?.(capturedAuthToken);
+          }
+        }
+      } catch {}
+
+      // Intercept /backend/nf/create to inject composer overrides + model override
+      let modifiedInit = init;
+      try {
+        const url = typeof input === 'string' ? input : input?.url || '';
+        if (NF_CREATE_RE.test(url) && init?.body) {
+          let body = init.body;
+          if (typeof body === 'string') {
+            try {
+              let nextBody = body;
+              const pendingOverrides = loadPendingCreateOverrides();
+              if (pendingOverrides) {
+                nextBody = applyComposerOverridesToCreateBody(nextBody, pendingOverrides);
+              }
+
+              const activeModelOverride = getActiveModelOverride();
+              if (activeModelOverride) {
+                const parsed = JSON.parse(nextBody);
+                parsed.model = activeModelOverride;
+                nextBody = JSON.stringify(parsed);
+              }
+
+              if (nextBody !== body) {
+                modifiedInit = { ...init, body: nextBody };
+              }
+
+              if (pendingOverrides) {
+                clearPendingCreateOverrides();
+              }
+            } catch {}
+          }
+        }
+      } catch {}
+
+      const res = await origFetch.call(this, input, modifiedInit);
       try {
         if (isDraftDetail()) return res;
         const url = typeof input === 'string' ? input : input?.url || '';
@@ -5600,11 +5803,14 @@ async function renderAnalyzeTable(force = false) {
         window.postMessage({ __sora_uv__: true, type: 'metrics_batch', items: batch }, '*');
       } catch {}
 
+    badgeDataGeneration++;
+    renderPassInFlight = true;
     renderBadges();
     if (!suppressDetailBadgeRender) {
       renderDetailBadge();
     }
     renderProfileImpact();
+    renderPassInFlight = false;
   }
 
   function processPostDetailJson(json) {
@@ -6469,6 +6675,7 @@ async function renderAnalyzeTable(force = false) {
 
   // == Observers & Lifecycle ==
   function runRenderPass() {
+    if (renderPassInFlight) return;
     if (isDraftDetail()) return;
     const onExplore = isExplore();
     const onProfile = isProfile();
@@ -6498,6 +6705,35 @@ async function renderAnalyzeTable(force = false) {
   });
 
   let observersActive = false;
+
+  // == Duration Selector Unlocker ==
+  function startMenuObserver() {
+    // Observer for when dropdown menus appear
+    const menuObserver = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
+          if (!(node instanceof HTMLElement)) continue;
+
+          const menuContent = node.matches?.('[data-radix-menu-content]')
+            ? node
+            : node.querySelector?.('[data-radix-menu-content]');
+
+          if (menuContent) {
+            // Check if this is the duration selector (contains "seconds" options) and enable disabled items
+            const hasDurationOptions = menuContent.textContent?.includes('seconds');
+            if (hasDurationOptions) {
+              menuContent.querySelectorAll('[role="menuitemradio"][aria-disabled="true"]').forEach((item) => {
+                item.removeAttribute('aria-disabled');
+                item.removeAttribute('data-disabled');
+              });
+            }
+          }
+        }
+      }
+    });
+
+    menuObserver.observe(document.body, { childList: true, subtree: true });
+  }
 
   function startObservers() {
     if (observersActive) return;
@@ -6710,6 +6946,37 @@ async function renderAnalyzeTable(force = false) {
     const navigated = rk !== prev;
     lastRouteKey = rk;
 
+    // Handle UV Drafts page
+    if (isUVDrafts()) {
+      // Hide other overlays
+      try {
+        if (analyzeOverlayEl) analyzeOverlayEl.style.display = 'none';
+      } catch {}
+
+      // Stop gathering if active
+      try {
+        isGatheringActiveThisTab = false;
+        stopGathering(false);
+      } catch {}
+
+      // Hide control bar on UV Drafts
+      teardownControlBar();
+
+      // Show UV Drafts page
+      ensureUVDraftsPage();
+      // /uv-drafts is an extension virtual route; keep tab title from falling back to 404.
+      startUVDraftsTitleGuard();
+      return;
+    } else {
+      // Hide UV Drafts page if we're not on that route
+      hideUVDraftsPage();
+      restoreDocumentTitleAfterUVDrafts();
+    }
+
+    if (isDrafts() || String(location.search || '').includes('remix')) {
+      checkPendingComposePrompt();
+    }
+
     if (isDraftDetail()) {
       // /d/... draft detail pages are extremely sensitive; avoid all injected work here.
       try {
@@ -6837,6 +7104,13 @@ async function renderAnalyzeTable(force = false) {
     }
     setBookmarks(bookmarks);
     return bookmarks.has(draftId);
+  }
+  function removeBookmark(draftId) {
+    const bookmarks = getBookmarks();
+    if (!bookmarks.has(draftId)) return false;
+    bookmarks.delete(draftId);
+    setBookmarks(bookmarks);
+    return true;
   }
   function isBookmarked(draftId) {
     return getBookmarks().has(draftId);
@@ -6981,11 +7255,85 @@ async function renderAnalyzeTable(force = false) {
       clearTimeout(dashboardInjectRetryId);
       dashboardInjectRetryId = null;
     }
-    
+
     try {
       dlog('feed', 'Dashboard button injected into left sidebar');
     } catch {}
+
+    // Also inject UV Drafts button
+    injectUVDraftsButton();
   }
+
+  // Inject UV Drafts button into sidebar
+  let uvDraftsBtnEl = null;
+
+  function injectUVDraftsButton() {
+    // Check if already exists
+    if (uvDraftsBtnEl && document.contains(uvDraftsBtnEl)) return;
+    const existing = document.querySelector('.sora-uv-drafts-btn');
+    if (existing) {
+      uvDraftsBtnEl = existing;
+      return;
+    }
+
+    // Find dashboard button to insert after
+    const dashboardBtn = document.querySelector('.sora-uv-dashboard-btn');
+    if (!dashboardBtn) return;
+
+    // Create UV Drafts button
+    const uvDraftsBtn = document.createElement('button');
+    uvDraftsBtn.className = 'sora-uv-drafts-btn p-3.5 group data-[state=open]:opacity-100 opacity-50 hover:opacity-100 focus-visible:opacity-100';
+    uvDraftsBtn.setAttribute('aria-label', 'UV Drafts');
+    uvDraftsBtn.setAttribute('type', 'button');
+    uvDraftsBtn.style.padding = '13px';
+
+    // Grid/folder icon
+    const iconSpanInline = document.createElement('span');
+    iconSpanInline.className = 'inline group-hover:hidden group-focus-visible:hidden';
+    iconSpanInline.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="25" height="25" viewBox="0 0 24 24" fill="none" class="h-6 w-6">
+      <rect x="3" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2"/>
+      <rect x="14" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2"/>
+      <rect x="3" y="14" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2"/>
+      <rect x="14" y="14" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2"/>
+    </svg>`;
+
+    const iconSpanHover = document.createElement('span');
+    iconSpanHover.className = 'hidden group-hover:inline group-focus-visible:inline';
+    iconSpanHover.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="25" height="25" viewBox="0 0 24 24" fill="none" class="h-6 w-6">
+      <rect x="3" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2.5"/>
+      <rect x="14" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2.5"/>
+      <rect x="3" y="14" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2.5"/>
+      <rect x="14" y="14" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2.5"/>
+    </svg>`;
+
+    const srOnly = document.createElement('div');
+    srOnly.className = 'sr-only';
+    srOnly.textContent = 'UV Drafts';
+
+    uvDraftsBtn.appendChild(iconSpanInline);
+    uvDraftsBtn.appendChild(iconSpanHover);
+    uvDraftsBtn.appendChild(srOnly);
+
+    // Insert after dashboard button
+    dashboardBtn.parentNode.insertBefore(uvDraftsBtn, dashboardBtn.nextSibling);
+    uvDraftsBtnEl = uvDraftsBtn;
+  }
+
+  // Global click delegation for UV Drafts button
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.sora-uv-drafts-btn');
+    if (!btn) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    // Navigate to UV Drafts page
+    if (uvDraftsPrevDocTitle == null && typeof document.title === 'string' && document.title.trim()) {
+      uvDraftsPrevDocTitle = document.title;
+    }
+    history.pushState({}, '', '/uv-drafts');
+    onRouteChange();
+  }, true);
 
   // Global click delegation for the dashboard button
   // This is more robust than attaching a listener to the element, which might be cloned or replaced by React
@@ -7067,14 +7415,17 @@ async function renderAnalyzeTable(force = false) {
     loadTaskToSourceDraft(); // Load task->draft mappings from localStorage
     installFetchSniffer();
     startObservers();
+    startMenuObserver();
     onRouteChange();
     window.addEventListener('storage', handleStorageChange);
+    startScheduledPostsTimer(); // Start background timer for scheduled posts
 
     // Inject dashboard button into left sidebar
     scheduleInjectDashboardButton();
 
     // Check for pending redo prompt (from remix navigation)
     checkPendingRedoPrompt();
+    checkPendingComposePrompt();
 
     // If this tab had Gather running pre-refresh, resume it AND start a fresh timer.
     const s = getGatherState() || {};
